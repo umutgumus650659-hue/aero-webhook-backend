@@ -11,7 +11,6 @@ app.get('/', (req, res) => {
   res.send('AERO Webhook Backend Canlıda! 🟢');
 });
 
-// 1. API Doğrulama
 app.post('/validate-api', (req, res) => {
   return res.json({
     success: true,
@@ -19,7 +18,7 @@ app.post('/validate-api', (req, res) => {
   });
 });
 
-// Yardımcı: İşletme Bilgilerini Firestore REST ile Arama
+// İşletme Bilgilerini Sorgulama
 async function getIsletmeBilgileri(targetId) {
   let isletmeEmail = 'komegena@gmail.com';
   let isletmeAdi = 'KOMEGENA';
@@ -70,7 +69,7 @@ async function getIsletmeBilgileri(targetId) {
   };
 }
 
-// 2. TRENDYOL WEBHOOK
+// 1. TRENDYOL WEBHOOK
 app.post('/webhook/trendyol', async (req, res) => {
   try {
     const data = req.body;
@@ -82,16 +81,13 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     const isletmeInfo = await getIsletmeBilgileri(targetSupplierId);
 
-    // Müşteri ve Adres
     const mAd = String(data.customer?.firstName ? `${data.customer.firstName} ${data.customer.lastName || ''}` : (data.musteriAdi || 'Müşteri'));
     const mTel = String(data.customer?.phone || data.telefon || data.phone || '');
     const mAdres = String(data.deliveryAddress?.fullAddress || data.deliveryAddress?.addressLine1 || data.adres || data.address || 'Belirtilmedi');
 
-    // GPS Koordinatları (Edirne Varsayılan)
     const latVal = Number(data.deliveryAddress?.latitude || data.latitude || data.lat || 41.6771);
     const lngVal = Number(data.deliveryAddress?.longitude || data.longitude || data.lng || 26.5557);
 
-    // Ürün Metni
     let urunMetni = '1x Ürün';
     if (data.lines && Array.isArray(data.lines) && data.lines.length > 0) {
       urunMetni = data.lines.map(l => `${l.quantity || 1}x ${l.productName || l.name || 'Ürün'}${l.notes ? ' ('+l.notes+')' : ''}`).join(', ');
@@ -99,14 +95,12 @@ app.post('/webhook/trendyol', async (req, res) => {
       urunMetni = String(data.detay);
     }
 
-    // E-posta küçük harfe zorlanır
     const finalEmail = String(data.isletmeEmail || isletmeInfo.isletmeEmail).toLowerCase().trim();
 
     const firestoreDocument = {
       fields: {
         siparisNo: { stringValue: String(data.orderNumber || data.siparisNo || data.id || 'TR-' + Date.now()) },
         
-        // E-posta Küçük Harfle Sabitlendi (Web Paneli Süzgeci İçin)
         isletmeEmail: { stringValue: finalEmail },
         isletmeAdi: { stringValue: isletmeInfo.isletmeAdi },
         marketAdi: { stringValue: isletmeInfo.isletmeAdi },
@@ -123,8 +117,8 @@ app.post('/webhook/trendyol', async (req, res) => {
         toplamTutar: { doubleValue: tutarVal },
         price: { doubleValue: tutarVal },
 
-        // CANLI WEB PANELİNDE GÖRÜNMESİ İÇİN:
-        durum: { stringValue: 'Yeni Siparis' },
+        // WEB PANELİNİN ÖNCE YAKALAMASI İÇİN DURUM YENİ (KURYE ÇEKMEDEN)
+        durum: { stringValue: 'YENI' },
         status: { stringValue: 'YENI' },
         havuzdaMi: { booleanValue: false },
         kuryeId: { stringValue: '' },
@@ -138,7 +132,6 @@ app.post('/webhook/trendyol', async (req, res) => {
         adres: { stringValue: mAdres },
         address: { stringValue: mAdres },
 
-        // GPS KOORDİNATLARI (Kurye Çoklu Atama Rota Hesabı İçin)
         enlem: { doubleValue: latVal },
         boylam: { doubleValue: lngVal },
         konum: { stringValue: `${latVal}, ${lngVal}` },
@@ -165,14 +158,14 @@ app.post('/webhook/trendyol', async (req, res) => {
       throw new Error(`Firestore REST hatası: ${errText}`);
     }
 
-    return res.status(200).json({ status: 'OK', message: 'Sipariş başarıyla kaydedildi' });
+    return res.status(200).json({ status: 'OK', message: 'Sipariş web paneline aktarıldı' });
   } catch (error) {
     console.error('Trendyol Webhook Hatası:', error.message);
     return res.status(500).json({ error: error.message });
   }
 });
 
-// 3. YEMEKSEPETİ WEBHOOK
+// 2. YEMEKSEPETİ WEBHOOK
 app.post('/webhook/yemeksepeti', async (req, res) => {
   try {
     const data = req.body;
@@ -220,7 +213,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         toplamTutar: { doubleValue: tutarVal },
         price: { doubleValue: tutarVal },
 
-        durum: { stringValue: 'Yeni Siparis' },
+        durum: { stringValue: 'YENI' },
         status: { stringValue: 'YENI' },
         havuzdaMi: { booleanValue: false },
         kuryeId: { stringValue: '' },
@@ -260,7 +253,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       throw new Error(`Firestore REST hatası: ${errText}`);
     }
 
-    return res.status(200).json({ status: 'OK', message: 'Sipariş başarıyla kaydedildi' });
+    return res.status(200).json({ status: 'OK', message: 'Sipariş web paneline aktarıldı' });
   } catch (error) {
     console.error('Yemeksepeti Webhook Hatası:', error.message);
     return res.status(500).json({ error: error.message });
