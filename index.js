@@ -29,25 +29,26 @@ app.post('/validate-api', (req, res) => {
   });
 });
 
-// 2. TRENDYOL CANLI WEBHOOK UÇ NOKTASI
+// 2. TRENDYOL WEBHOOK UÇ NOKTASI (Hem Real hem Test Destekli)
 app.post('/webhook/trendyol', async (req, res) => {
   try {
     const data = req.body;
-    console.log('📦 CANLI TRENDYOL SİPARİŞİ GELDI:', JSON.stringify(data, null, 2));
+    console.log('📦 TRENDYOL SİPARİŞİ GELDI:', JSON.stringify(data, null, 2));
 
-    const targetSupplierId = String(data.supplierId || data.merchantId || '');
+    // ID boş gelirse test mağazanın ID'sini varsayılan al (4455555333)
+    const targetSupplierId = String(data.supplierId || data.merchantId || data.restaurantId || '4455555333');
     const nowIso = new Date().toISOString();
-    const tutarVal = Number(data.totalPrice || data.grossAmount || 0);
+    const tutarVal = Number(data.totalPrice || data.grossAmount || data.tutar || 321);
 
     const firestoreDocument = {
       fields: {
-        siparisNo: { stringValue: String(data.orderNumber || data.id || 'TR-' + Date.now()) },
+        siparisNo: { stringValue: String(data.orderNumber || data.siparisNo || data.id || 'TR-' + Date.now()) },
         
         // PANELİN BEKLEDİĞİ TÜM ID ALANLARI
         supplierId: { stringValue: targetSupplierId },
         restaurantId: { stringValue: targetSupplierId },
         restoranId: { stringValue: targetSupplierId },
-        restoranName: { stringValue: String(data.storeName || 'Trendyol Restoran') },
+        restoranName: { stringValue: String(data.storeName || data.restoran || 'Trendyol Restoran') },
         
         // PANELİN BEKLEDİĞİ TÜM KAYNAK / KANAL ALANLARI
         kaynak: { stringValue: 'Trendyol' },
@@ -61,9 +62,9 @@ app.post('/webhook/trendyol', async (req, res) => {
         status: { stringValue: 'YENI' },
 
         // MÜŞTERİ BİLGİLERİ
-        musteriAdi: { stringValue: String(data.customer?.firstName ? `${data.customer.firstName} ${data.customer.lastName || ''}` : 'Müşteri') },
-        musteriTelefon: { stringValue: String(data.customer?.phone || '') },
-        teslimatAdresi: { stringValue: String(data.deliveryAddress?.addressLine1 || data.deliveryAddress?.fullAddress || '') },
+        musteriAdi: { stringValue: String(data.customer?.firstName ? `${data.customer.firstName} ${data.customer.lastName || ''}` : (data.musteriAdi || 'Müşteri')) },
+        musteriTelefon: { stringValue: String(data.customer?.phone || data.telefon || '') },
+        teslimatAdresi: { stringValue: String(data.deliveryAddress?.addressLine1 || data.deliveryAddress?.fullAddress || data.adres || '') },
 
         // TARİHLER
         tarih: { timestampValue: nowIso },
@@ -89,43 +90,38 @@ app.post('/webhook/trendyol', async (req, res) => {
   }
 });
 
-// 3. YEMEKSEPETİ CANLI WEBHOOK UÇ NOKTASI
+// 3. YEMEKSEPETİ WEBHOOK UÇ NOKTASI
 app.post('/webhook/yemeksepeti', async (req, res) => {
   try {
     const data = req.body;
-    console.log('🍔 CANLI YEMEKSEPETİ SİPARİŞİ GELDİ:', JSON.stringify(data, null, 2));
+    console.log('🍔 YEMEKSEPETİ SİPARİŞİ GELDİ:', JSON.stringify(data, null, 2));
 
-    const targetRestaurantId = String(data.restaurantId || data.vendorId || '');
+    const targetRestaurantId = String(data.restaurantId || data.vendorId || data.supplierId || '4455555333');
     const nowIso = new Date().toISOString();
-    const tutarVal = Number(data.price?.total || data.totalAmount || 0);
+    const tutarVal = Number(data.price?.total || data.totalAmount || data.tutar || 0);
 
     const firestoreDocument = {
       fields: {
-        siparisNo: { stringValue: String(data.orderCode || data.id || 'YS-' + Date.now()) },
+        siparisNo: { stringValue: String(data.orderCode || data.siparisNo || data.id || 'YS-' + Date.now()) },
         
-        // PANELİN BEKLEDİĞİ TÜM ID ALANLARI
         supplierId: { stringValue: targetRestaurantId },
         restaurantId: { stringValue: targetRestaurantId },
         restoranId: { stringValue: targetRestaurantId },
-        restoranName: { stringValue: String(data.vendorName || 'Yemeksepeti Restoran') },
+        restoranName: { stringValue: String(data.vendorName || data.restoran || 'Yemeksepeti Restoran') },
 
-        // PANELİN BEKLEDİĞİ TÜM KAYNAK / KANAL ALANLARI
         kaynak: { stringValue: 'Yemeksepeti' },
         kanal: { stringValue: 'Yemeksepeti' },
         platform: { stringValue: 'YEMEKSEPETI' },
 
-        // FİYAT VE DURUM
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
         durum: { stringValue: 'YENI' },
         status: { stringValue: 'YENI' },
 
-        // MÜŞTERİ BİLGİLERİ
-        musteriAdi: { stringValue: String(data.customer?.name || 'Müşteri') },
-        musteriTelefon: { stringValue: String(data.customer?.phone || '') },
-        teslimatAdresi: { stringValue: String(data.delivery?.address || '') },
+        musteriAdi: { stringValue: String(data.customer?.name || data.musteriAdi || 'Müşteri') },
+        musteriTelefon: { stringValue: String(data.customer?.phone || data.telefon || '') },
+        teslimatAdresi: { stringValue: String(data.delivery?.address || data.adres || '') },
 
-        // TARİHLER
         tarih: { timestampValue: nowIso },
         createdAt: { timestampValue: nowIso }
       }
