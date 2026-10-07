@@ -18,21 +18,24 @@ app.post('/validate-api', (req, res) => {
   });
 });
 
-// TEST WEBHOOK (Siparişi Firestore REST API ile Doğrudan Kaydeder)
+// TEST WEBHOOK (Restoran/Supplier ID ile Eşleşen Sipariş Kaydı)
 app.post('/webhook/trendyol-test', async (req, res) => {
   try {
     const siparisVerisi = req.body;
     console.log('🟢 YENİ SİPARİŞ ALINDI:', siparisVerisi);
 
+    const targetSupplierId = String(siparisVerisi.supplierId || siparisVerisi.restaurantId || '4455555333');
+
     // Firebase Firestore REST API Uç Noktası
     const firestoreUrl = 'https://firestore.googleapis.com/v1/projects/shopier-1d17c/databases/(default)/documents/siparisler';
 
-    // Firestore REST API Formatına Çevirme
     const firestoreDocument = {
       fields: {
         siparisNo: { stringValue: String(siparisVerisi.siparisNo || 'TEST-' + Date.now()) },
-        restoran: { stringValue: String(siparisVerisi.restoran || 'KOMEGENA') },
-        tutar: { doubleValue: Number(siparisVerisi.tutar || 0) },
+        supplierId: { stringValue: targetSupplierId },
+        restaurantId: { stringValue: targetSupplierId },
+        restoranName: { stringValue: String(siparisVerisi.restoran || 'KOMEGENA') },
+        tutar: { doubleValue: Number(siparisVerisi.tutar || 321) },
         kaynak: { stringValue: 'Trendyol' },
         durum: { stringValue: 'YENI' },
         tarih: { timestampValue: new Date().toISOString() }
@@ -55,7 +58,7 @@ app.post('/webhook/trendyol-test', async (req, res) => {
 
     return res.status(200).json({
       durum: 'BASARILI',
-      mesaj: 'Sipariş Firebase veritabanına başarıyla kaydedildi! 🟢',
+      mesaj: 'Sipariş başarıyla restoran eşleşmesiyle kaydedildi! 🟢',
       firestoreId: resData.name
     });
   } catch (error) {
