@@ -6,9 +6,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Firebase Admin ilklendirme (Eğer ortam değişkeni yoksa varsayılan mod)
+// Firebase Admin ilklendirme (Proje ID eklendi)
 if (!admin.apps.length) {
-  admin.initializeApp();
+  admin.initializeApp({
+    projectId: 'shopier-1d17c'
+  });
 }
 const db = admin.firestore();
 
