@@ -18,27 +18,41 @@ app.post('/validate-api', (req, res) => {
   });
 });
 
-// TEST WEBHOOK (Restoran/Supplier ID ile Eşleşen Sipariş Kaydı)
+// TEST WEBHOOK (Tüm olası Flutter alan adlarıyla Firestore kaydı)
 app.post('/webhook/trendyol-test', async (req, res) => {
   try {
     const siparisVerisi = req.body;
     console.log('🟢 YENİ SİPARİŞ ALINDI:', siparisVerisi);
 
     const targetSupplierId = String(siparisVerisi.supplierId || siparisVerisi.restaurantId || '4455555333');
+    const nowIso = new Date().toISOString();
 
     // Firebase Firestore REST API Uç Noktası
     const firestoreUrl = 'https://firestore.googleapis.com/v1/projects/shopier-1d17c/databases/(default)/documents/siparisler';
 
     const firestoreDocument = {
       fields: {
-        siparisNo: { stringValue: String(siparisVerisi.siparisNo || 'TEST-' + Date.now()) },
+        siparisNo: { stringValue: String(siparisVerisi.siparisNo || 'TR-' + Date.now()) },
+        // FARKLI KODLAMA İHTİMALLERİNE KARŞI TÜM ID ALANLARI
         supplierId: { stringValue: targetSupplierId },
         restaurantId: { stringValue: targetSupplierId },
+        restoranId: { stringValue: targetSupplierId },
         restoranName: { stringValue: String(siparisVerisi.restoran || 'KOMEGENA') },
-        tutar: { doubleValue: Number(siparisVerisi.tutar || 321) },
+        
+        // KAYNAK / KANAL
         kaynak: { stringValue: 'Trendyol' },
+        kanal: { stringValue: 'Trendyol' },
+        platform: { stringValue: 'TRENDYOL' },
+
+        // FİYAT VE DURUM
+        tutar: { doubleValue: Number(siparisVerisi.tutar || 321) },
+        toplamTutar: { doubleValue: Number(siparisVerisi.tutar || 321) },
         durum: { stringValue: 'YENI' },
-        tarih: { timestampValue: new Date().toISOString() }
+        status: { stringValue: 'YENI' },
+
+        // TARİH
+        tarih: { timestampValue: nowIso },
+        createdAt: { timestampValue: nowIso }
       }
     };
 
@@ -58,7 +72,7 @@ app.post('/webhook/trendyol-test', async (req, res) => {
 
     return res.status(200).json({
       durum: 'BASARILI',
-      mesaj: 'Sipariş başarıyla restoran eşleşmesiyle kaydedildi! 🟢',
+      mesaj: 'Sipariş başarıyla esnek formatta kaydedildi! 🟢',
       firestoreId: resData.name
     });
   } catch (error) {
