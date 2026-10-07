@@ -1,18 +1,9 @@
 const express = require('express');
 const cors = require('cors');
-const admin = require('firebase-admin');
 const app = express();
 
 app.use(cors());
 app.use(express.json());
-
-// Firebase Admin ilklendirme (Proje ID eklendi)
-if (!admin.apps.length) {
-  admin.initializeApp({
-    projectId: 'shopier-1d17c'
-  });
-}
-const db = admin.firestore();
 
 // Ana Sayfa
 app.get('/', (req, res) => {
@@ -27,26 +18,48 @@ app.post('/validate-api', (req, res) => {
   });
 });
 
-// TEST WEBHOOK (Gelen Siparişi Firestore'a Kaydeder)
+// TEST WEBHOOK (Siparişi Firestore REST API ile Doğrudan Kaydeder)
 app.post('/webhook/trendyol-test', async (req, res) => {
   try {
     const siparisVerisi = req.body;
     console.log('🟢 YENİ SİPARİŞ ALINDI:', siparisVerisi);
 
-    // Gelen siparişi Firestore 'siparisler' koleksiyonuna ekliyoruz
-    await db.collection('siparisler').add({
-      ...siparisVerisi,
-      kaynak: 'Trendyol',
-      tarih: admin.firestore.FieldValue.serverTimestamp(),
-      durum: 'YENI'
+    // Firebase Firestore REST API Uç Noktası
+    const firestoreUrl = 'https://firestore.googleapis.com/v1/projects/shopier-1d17c/databases/(default)/documents/siparisler';
+
+    // Firestore REST API Formatına Çevirme
+    const firestoreDocument = {
+      fields: {
+        siparisNo: { stringValue: String(siparisVerisi.siparisNo || 'TEST-' + Date.now()) },
+        restoran: { stringValue: String(siparisVerisi.restoran || 'KOMEGENA') },
+        tutar: { doubleValue: Number(siparisVerisi.tutar || 0) },
+        kaynak: { stringValue: 'Trendyol' },
+        durum: { stringValue: 'YENI' },
+        tarih: { timestampValue: new Date().toISOString() }
+      }
+    };
+
+    const response = await fetch(firestoreUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(firestoreDocument)
     });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Firestore REST hatası: ${errText}`);
+    }
+
+    const resData = await response.json();
+    console.log('🟢 FIRESTORE KAYIT BAŞARILI:', resData.name);
 
     return res.status(200).json({
       durum: 'BASARILI',
-      mesaj: 'Sipariş Render tarafından alındı ve Firebase veritabanına kaydedildi! 🟢'
+      mesaj: 'Sipariş Firebase veritabanına başarıyla kaydedildi! 🟢',
+      firestoreId: resData.name
     });
   } catch (error) {
-    console.error('Firestore kayıt hatası:', error);
+    console.error('Kayıt Hatası:', error.message);
     return res.status(500).json({ durum: 'HATA', mesaj: error.message });
   }
 });
