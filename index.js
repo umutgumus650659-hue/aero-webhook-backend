@@ -7,22 +7,22 @@ app.use(express.json());
 
 const FIRESTORE_BASE_URL = 'https://firestore.googleapis.com/v1/projects/shopier-1d17c/databases/(default)/documents';
 
-// Ana Sayfa Sağlık Kontrolü
+// Sağlık Kontrolü
 app.get('/', (req, res) => {
-  res.send('AERO Webhook Backend - CANLI ÜRETİM MODU AKTİF 🟢');
+  res.send('AERO Webhook Backend - CANLI MOD AKTİF 🟢');
 });
 
-// API Doğrulama Endpoint
+// API Doğrulama
 app.post('/validate-api', (req, res) => {
-  return res.json({ success: true, message: 'API bilgileri doğrulandı 🟢' });
+  return res.json({ success: true, message: 'API doğrulandı 🟢' });
 });
 
 // =====================================================================
-// 1. DİNAMİK İŞLETME BİLGİSİ ÇEKME (TAM GERÇEK / TEST SIZDIRMAZ)
+// 1. DİNAMİK İŞLETME BİLGİSİ ÇEKME (TAM GERÇEK EŞLEŞTİRME)
 // =====================================================================
 async function getIsletmeBilgileri(targetId) {
   if (!targetId || targetId === 'undefined' || targetId === 'null') {
-    throw new Error('Geçersiz Mağaza/Tedarikçi ID bilgisi');
+    throw new Error('Tedarikçi / Restoran ID eksik.');
   }
 
   let isletmeEmail = '';
@@ -30,58 +30,58 @@ async function getIsletmeBilgileri(targetId) {
   let restoranEnlem = 0.0;
   let restoranBoylam = 0.0;
 
-  try {
-    const queryBody = {
-      structuredQuery: {
-        from: [{ collectionId: 'isletme_entegrasyonlar' }],
-        where: {
-          compositeFilter: {
-            op: 'OR',
-            filters: [
-              { fieldFilter: { field: { fieldPath: 'trSupplierId' }, op: 'EQUAL', value: { stringValue: String(targetId) } } },
-              { fieldFilter: { field: { fieldPath: 'ysRestoranId' }, op: 'EQUAL', value: { stringValue: String(targetId) } } }
-            ]
-          }
-        },
-        limit: 1
+  const queryBody = {
+    structuredQuery: {
+      from: [{ collectionId: 'isletme_entegrasyonlar' }],
+      where: {
+        compositeFilter: {
+          op: 'OR',
+          filters: [
+            { fieldFilter: { field: { fieldPath: 'trSupplierId' }, op: 'EQUAL', value: { stringValue: String(targetId) } } },
+            { fieldFilter: { field: { fieldPath: 'ysRestoranId' }, op: 'EQUAL', value: { stringValue: String(targetId) } } }
+          ]
+        }
+      },
+      limit: 1
+    }
+  };
+
+  const response = await fetch(`${FIRESTORE_BASE_URL}:runQuery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(queryBody)
+  });
+
+  if (response.ok) {
+    const results = await response.json();
+    if (results && results[0] && results[0].document && results[0].document.fields) {
+      const fields = results[0].document.fields;
+      
+      if (fields.isletmeEmail && fields.isletmeEmail.stringValue) {
+        isletmeEmail = fields.isletmeEmail.stringValue.toLowerCase().trim();
       }
-    };
-
-    const response = await fetch(`${FIRESTORE_BASE_URL}:runQuery`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(queryBody)
-    });
-
-    if (response.ok) {
-      const results = await response.json();
-      if (results && results[0] && results[0].document && results[0].document.fields) {
-        const fields = results[0].document.fields;
-        
-        if (fields.isletmeEmail && fields.isletmeEmail.stringValue) {
-          isletmeEmail = fields.isletmeEmail.stringValue.toLowerCase().trim();
-        }
-        if (fields.isletmeAdi && fields.isletmeAdi.stringValue) {
-          isletmeAdi = fields.isletmeAdi.stringValue;
-        } else if (fields.unvan && fields.unvan.stringValue) {
-          isletmeAdi = fields.unvan.stringValue;
-        }
-        if (fields.enlem) {
-          restoranEnlem = Number(fields.enlem.doubleValue || fields.enlem.integerValue || 0);
-        }
-        if (fields.boylam) {
-          restoranBoylam = Number(fields.boylam.doubleValue || fields.boylam.integerValue || 0);
-        }
+      if (fields.isletmeAdi && fields.isletmeAdi.stringValue) {
+        isletmeAdi = fields.isletmeAdi.stringValue;
+      } else if (fields.unvan && fields.unvan.stringValue) {
+        isletmeAdi = fields.unvan.stringValue;
+      }
+      if (fields.enlem) {
+        restoranEnlem = Number(fields.enlem.doubleValue || fields.enlem.integerValue || 0);
+      }
+      if (fields.boylam) {
+        restoranBoylam = Number(fields.boylam.doubleValue || fields.boylam.integerValue || 0);
       }
     }
-  } catch (err) {
-    console.error('İşletme Bilgisi Firestore Eşleştirme Hatası:', err.message);
+  }
+
+  if (!isletmeEmail) {
+    throw new Error(`ID: ${targetId} için eşleşen aktif işletme bulunamadı.`);
   }
 
   return { isletmeEmail, isletmeAdi, restoranEnlem, restoranBoylam };
 }
 
-// Yardımcı Ödeme Yöntemi Ayrıştırıcı (Nakit / POS / Online)
+// Ödeme Yöntemi Ayrıştırıcı
 function parseOdemeTipi(paymentType, isPaid) {
   if (!paymentType) return isPaid ? 'Online Ödeme' : 'Nakit';
   
@@ -94,23 +94,22 @@ function parseOdemeTipi(paymentType, isPaid) {
 }
 
 // =====================================================================
-// 2. TRENDYOL GERÇEK CANLI WEBHOOK
+// 2. TRENDYOL CANLI WEBHOOK
 // =====================================================================
 app.post('/webhook/trendyol', async (req, res) => {
   try {
     const data = req.body;
-    console.log('📦 TRENDYOL CANLI WEBHOOK SİPARİŞİ:', JSON.stringify(data, null, 2));
-
     const targetSupplierId = String(data.supplierId || data.merchantId || data.restaurantId || '');
+
     if (!targetSupplierId) {
-      return res.status(400).json({ error: 'Tedarikçi ID (supplierId) bulunamadı.' });
+      return res.status(400).json({ error: 'supplierId eksik.' });
     }
 
     const isletmeInfo = await getIsletmeBilgileri(targetSupplierId);
     const nowIso = new Date().toISOString();
     const tutarVal = Number(data.totalPrice || data.grossAmount || data.settlementAmount || data.tutar || 0);
 
-    // Müşteri & Telefon & PIN
+    // Müşteri & İletişim
     const customerObj = data.customer || {};
     const mAd = String(
       customerObj.firstName 
@@ -129,19 +128,18 @@ app.post('/webhook/trendyol', async (req, res) => {
       data.adres || 
       'Adres Belirtilmedi'
     );
-    
     const mNot = String(data.note || data.customerNote || addrObj.note || data.siparisNotu || '');
 
-    // GPS / Enlem-Boylam
+    // GPS
     const latVal = Number(addrObj.latitude || data.latitude || data.lat || 0);
     const lngVal = Number(addrObj.longitude || data.longitude || data.lng || 0);
 
-    // Ödeme Tipi
+    // Ödeme
     const rawPayment = data.paymentType || data.paymentMethod || data.paymentMode || 'Online';
     const odemeYontemi = parseOdemeTipi(rawPayment, true);
 
-    // Ürün / Sepet Ayrıştırma (Tüm Opsiyonlar Dahil)
-    let urunMetni = '1x Ürün';
+    // Ürün İçeriği
+    let urunMetni = '';
     const rawLines = data.lines || data.items || data.products || [];
     if (Array.isArray(rawLines) && rawLines.length > 0) {
       urunMetni = rawLines.map(l => {
@@ -182,7 +180,6 @@ app.post('/webhook/trendyol', async (req, res) => {
         havuzdaMi: { booleanValue: false },
         kuryeId: { stringValue: '' },
 
-        // MÜŞTERİ BİLGİLERİ
         musteriAdi: { stringValue: mAd },
         customerName: { stringValue: mAd },
         musteriTelefon: { stringValue: mTel },
@@ -197,18 +194,15 @@ app.post('/webhook/trendyol', async (req, res) => {
         not: { stringValue: mNot },
         siparisNotu: { stringValue: mNot },
 
-        // ÖDEME BİLGİSİ
         odemeTipi: { stringValue: odemeYontemi },
         paymentType: { stringValue: odemeYontemi },
 
-        // GPS KOORDİNATLARI
         enlem: { doubleValue: latVal },
         boylam: { doubleValue: lngVal },
         konum: { stringValue: `${latVal}, ${lngVal}` },
         restoranEnlem: { doubleValue: isletmeInfo.restoranEnlem },
         restoranBoylam: { doubleValue: isletmeInfo.restoranBoylam },
 
-        // ÜRÜN İÇERİĞİ
         detay: { stringValue: urunMetni },
         urunler: { stringValue: urunMetni },
 
@@ -223,31 +217,30 @@ app.post('/webhook/trendyol', async (req, res) => {
       body: JSON.stringify(firestoreDocument)
     });
 
-    return res.status(200).json({ status: 'OK', message: 'Trendyol Siparişi Başarıyla İşlendi' });
+    return res.status(200).json({ status: 'OK' });
   } catch (error) {
-    console.error('Trendyol Webhook Hatası:', error);
+    console.error('Trendyol Webhook Hatası:', error.message);
     return res.status(500).json({ error: error.message });
   }
 });
 
 // =====================================================================
-// 3. YEMEKSEPETİ GERÇEK CANLI WEBHOOK
+// 3. YEMEKSEPETİ CANLI WEBHOOK
 // =====================================================================
 app.post('/webhook/yemeksepeti', async (req, res) => {
   try {
     const data = req.body;
-    console.log('🍔 YEMEKSEPETİ CANLI WEBHOOK SİPARİŞİ:', JSON.stringify(data, null, 2));
-
     const targetRestaurantId = String(data.restaurantId || data.vendorId || data.supplierId || '');
+
     if (!targetRestaurantId) {
-      return res.status(400).json({ error: 'Restoran ID (restaurantId) bulunamadı.' });
+      return res.status(400).json({ error: 'restaurantId eksik.' });
     }
 
     const isletmeInfo = await getIsletmeBilgileri(targetRestaurantId);
     const nowIso = new Date().toISOString();
     const tutarVal = Number(data.price?.total || data.totalAmount || data.totalPrice || data.tutar || 0);
 
-    // Müşteri & Telefon & PIN
+    // Müşteri & İletişim
     const customerObj = data.customer || {};
     const mAd = String(customerObj.name || customerObj.firstName || data.customerName || data.musteriAdi || 'Müşteri');
     const mTel = String(customerObj.phone || data.delivery?.phone || data.telefon || data.phone || '');
@@ -262,12 +255,12 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     const latVal = Number(deliv.location?.lat || deliv.location?.latitude || deliv.latitude || data.latitude || data.lat || 0);
     const lngVal = Number(deliv.location?.lng || deliv.location?.longitude || deliv.longitude || data.longitude || data.lng || 0);
 
-    // Ödeme Tipi
+    // Ödeme
     const rawPayment = data.paymentMethod || data.paymentType || data.paymentMode || 'Online';
     const odemeYontemi = parseOdemeTipi(rawPayment, data.isPaid !== false);
 
-    // Ürün Ayrıştırma (Soslar ve Seçenekler Dahil)
-    let urunMetni = '1x Ürün';
+    // Ürün İçeriği
+    let urunMetni = '';
     const rawItems = data.items || data.products || [];
     if (Array.isArray(rawItems) && rawItems.length > 0) {
       urunMetni = rawItems.map(i => {
@@ -310,7 +303,6 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         havuzdaMi: { booleanValue: false },
         kuryeId: { stringValue: '' },
 
-        // MÜŞTERİ BİLGİLERİ
         musteriAdi: { stringValue: mAd },
         customerName: { stringValue: mAd },
         musteriTelefon: { stringValue: mTel },
@@ -325,18 +317,15 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         not: { stringValue: mNot },
         siparisNotu: { stringValue: mNot },
 
-        // ÖDEME BİLGİSİ
         odemeTipi: { stringValue: odemeYontemi },
         paymentType: { stringValue: odemeYontemi },
 
-        // GPS KOORDİNATLARI
         enlem: { doubleValue: latVal },
         boylam: { doubleValue: lngVal },
         konum: { stringValue: `${latVal}, ${lngVal}` },
         restoranEnlem: { doubleValue: isletmeInfo.restoranEnlem },
         restoranBoylam: { doubleValue: isletmeInfo.restoranBoylam },
 
-        // ÜRÜN İÇERİĞİ
         detay: { stringValue: urunMetni },
         urunler: { stringValue: urunMetni },
 
@@ -351,26 +340,23 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       body: JSON.stringify(firestoreDocument)
     });
 
-    return res.status(200).json({ status: 'OK', message: 'Yemeksepeti Siparişi Başarıyla İşlendi' });
+    return res.status(200).json({ status: 'OK' });
   } catch (error) {
-    console.error('Yemeksepeti Webhook Hatası:', error);
+    console.error('Yemeksepeti Webhook Hatası:', error.message);
     return res.status(500).json({ error: error.message });
   }
 });
 
 // =====================================================================
-// 4. KURYE MOBİL UYGULAMASI İÇİN DURUM GÜNCELLEME ENDPOINT'İ
+// 4. KURYE MOBİL UYGULAMASI DURUM GÜNCELLEME
 // =====================================================================
 app.post('/update-order-status', async (req, res) => {
   try {
-    const { siparisId, durum, kanal } = req.body;
+    const { siparisId, durum } = req.body;
     if (!siparisId || !durum) {
-      return res.status(400).json({ error: 'siparisId ve durum zorunludur.' });
+      return res.status(400).json({ error: 'siparisId ve durum parametreleri zorunludur.' });
     }
 
-    console.log(`🔄 Sipariş Durum Güncellemesi: ${siparisId} -> ${durum}`);
-
-    // Firestore dokümanını güncelle
     const updateBody = {
       fields: {
         durum: { stringValue: durum },
@@ -384,14 +370,14 @@ app.post('/update-order-status', async (req, res) => {
       body: JSON.stringify(updateBody)
     });
 
-    return res.json({ success: true, message: 'Sipariş durumu güncellendi' });
+    return res.json({ success: true });
   } catch (error) {
-    console.error('Durum Güncelleme Hatası:', error);
+    console.error('Durum Güncelleme Hatası:', error.message);
     return res.status(500).json({ error: error.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Sunucu ${PORT} portunda canlı üretim modunda çalışıyor.`);
+  console.log(`AERO Backend ${PORT} portunda canlı modda çalışıyor.`);
 });
