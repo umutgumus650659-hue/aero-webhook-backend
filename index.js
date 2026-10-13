@@ -17,9 +17,7 @@ app.post('/validate-api', (req, res) => {
   return res.json({ success: true, message: 'API doğrulandı 🟢' });
 });
 
-// =====================================================================
-// 1. DİNAMİK İŞLETME BİLGİSİ ÇEKME (TAM GERÇEK EŞLEŞTİRME)
-// =====================================================================
+// 1. DİNAMİK İŞLETME BİLGİSİ ÇEKME
 async function getIsletmeBilgileri(targetId) {
   if (!targetId || targetId === 'undefined' || targetId === 'null') {
     throw new Error('Tedarikçi / Restoran ID eksik.');
@@ -81,21 +79,16 @@ async function getIsletmeBilgileri(targetId) {
   return { isletmeEmail, isletmeAdi, restoranEnlem, restoranBoylam };
 }
 
-// Ödeme Yöntemi Ayrıştırıcı
 function parseOdemeTipi(paymentType, isPaid) {
   if (!paymentType) return isPaid ? 'Online Ödeme' : 'Nakit';
-  
   const pStr = String(paymentType).toLowerCase();
   if (pStr.includes('cash') || pStr.includes('nakit')) return 'Nakit';
   if (pStr.includes('credit') || pStr.includes('pos') || pStr.includes('kredi') || pStr.includes('card')) return 'Kapıda Kredi Kartı';
   if (pStr.includes('online') || pStr.includes('prepaid') || pStr.includes('wallet') || pStr.includes('pay') || pStr.includes('yemekkarti')) return 'Online Ödeme';
-  
   return String(paymentType);
 }
 
-// =====================================================================
 // 2. TRENDYOL CANLI WEBHOOK
-// =====================================================================
 app.post('/webhook/trendyol', async (req, res) => {
   try {
     const data = req.body;
@@ -109,7 +102,6 @@ app.post('/webhook/trendyol', async (req, res) => {
     const nowIso = new Date().toISOString();
     const tutarVal = Number(data.totalPrice || data.grossAmount || data.settlementAmount || data.tutar || 0);
 
-    // Müşteri & İletişim
     const customerObj = data.customer || {};
     const mAd = String(
       customerObj.firstName 
@@ -119,7 +111,6 @@ app.post('/webhook/trendyol', async (req, res) => {
     const mTel = String(customerObj.phone || data.telefon || data.phone || data.customerPhone || '');
     const mPin = String(customerObj.pin || data.pinKodu || data.pin || customerObj.extension || '');
 
-    // Adres & Not
     const addrObj = data.shipmentAddress || data.deliveryAddress || data.address || {};
     const mAdres = String(
       addrObj.fullAddress || 
@@ -130,27 +121,22 @@ app.post('/webhook/trendyol', async (req, res) => {
     );
     const mNot = String(data.note || data.customerNote || addrObj.note || data.siparisNotu || '');
 
-    // GPS
     const latVal = Number(addrObj.latitude || data.latitude || data.lat || 0);
     const lngVal = Number(addrObj.longitude || data.longitude || data.lng || 0);
 
-    // Ödeme
     const rawPayment = data.paymentType || data.paymentMethod || data.paymentMode || 'Online';
     const odemeYontemi = parseOdemeTipi(rawPayment, true);
 
-    // Ürün İçeriği
     let urunMetni = '';
     const rawLines = data.lines || data.items || data.products || [];
     if (Array.isArray(rawLines) && rawLines.length > 0) {
       urunMetni = rawLines.map(l => {
         const q = l.quantity || l.count || 1;
         const pName = l.productName || l.name || 'Ürün';
-        
         let opts = '';
         if (Array.isArray(l.options) && l.options.length > 0) {
           opts = ` (${l.options.map(o => o.name || o).join(', ')})`;
         }
-        
         const n = l.notes || l.note ? ` [Not: ${l.notes || l.note}]` : '';
         return `• ${q}x ${pName}${opts}${n}`;
       }).join('\n');
@@ -175,15 +161,16 @@ app.post('/webhook/trendyol', async (req, res) => {
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
 
-        // Kurye uygulamasının siparişi havuza düşürmesi için düzeltildi
-        durum: { stringValue: 'Havuzda Bekliyor' },
-        status: { stringValue: 'Havuzda Bekliyor' },
-        havuzdaMi: { booleanValue: true },
+        // Sıralama kuralı: İlk olarak Web Paneline Düşer
+        durum: { stringValue: 'YENI' },
+        status: { stringValue: 'YENI' },
+        havuzdaMi: { booleanValue: false },
         kuryeId: { stringValue: '' },
 
         musteriAdi: { stringValue: mAd },
         customerName: { stringValue: mAd },
         musteriTelefon: { stringValue: mTel },
+        musteriTel: { stringValue: mTel },
         telefon: { stringValue: mTel },
         phone: { stringValue: mTel },
         pinKodu: { stringValue: mPin },
@@ -205,6 +192,7 @@ app.post('/webhook/trendyol', async (req, res) => {
         restoranBoylam: { doubleValue: isletmeInfo.restoranBoylam },
 
         detay: { stringValue: urunMetni },
+        sepetDetay: { stringValue: urunMetni },
         urunler: { stringValue: urunMetni },
 
         tarih: { timestampValue: nowIso },
@@ -225,9 +213,7 @@ app.post('/webhook/trendyol', async (req, res) => {
   }
 });
 
-// =====================================================================
 // 3. YEMEKSEPETİ CANLI WEBHOOK
-// =====================================================================
 app.post('/webhook/yemeksepeti', async (req, res) => {
   try {
     const data = req.body;
@@ -241,40 +227,33 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     const nowIso = new Date().toISOString();
     const tutarVal = Number(data.price?.total || data.totalAmount || data.totalPrice || data.tutar || 0);
 
-    // Müşteri & İletişim
     const customerObj = data.customer || {};
     const mAd = String(customerObj.name || customerObj.firstName || data.customerName || data.musteriAdi || 'Müşteri');
     const mTel = String(customerObj.phone || data.delivery?.phone || data.telefon || data.phone || '');
     const mPin = String(customerObj.pin || customerObj.extension || data.pinKodu || data.pin || '');
 
-    // Adres & Not
     const deliv = data.delivery || data.address || {};
     const mAdres = String(deliv.address || deliv.fullAddress || data.adres || data.address || 'Adres Belirtilmedi');
     const mNot = String(data.notes || data.customerNote || deliv.note || data.siparisNotu || '');
 
-    // GPS
     const latVal = Number(deliv.location?.lat || deliv.location?.latitude || deliv.latitude || data.latitude || data.lat || 0);
     const lngVal = Number(deliv.location?.lng || deliv.location?.longitude || deliv.longitude || data.longitude || data.lng || 0);
 
-    // Ödeme
     const rawPayment = data.paymentMethod || data.paymentType || data.paymentMode || 'Online';
     const odemeYontemi = parseOdemeTipi(rawPayment, data.isPaid !== false);
 
-    // Ürün İçeriği
     let urunMetni = '';
     const rawItems = data.items || data.products || [];
     if (Array.isArray(rawItems) && rawItems.length > 0) {
       urunMetni = rawItems.map(i => {
         const q = i.quantity || i.count || 1;
         const pName = i.name || i.productName || 'Ürün';
-        
         let opts = '';
         if (Array.isArray(i.options) && i.options.length > 0) {
           opts = ` (${i.options.map(o => o.name || o).join(', ')})`;
         } else if (Array.isArray(i.selectedToppings) && i.selectedToppings.length > 0) {
           opts = ` (${i.selectedToppings.map(t => t.name || t).join(', ')})`;
         }
-
         const n = i.notes || i.note ? ` [Not: ${i.notes || i.note}]` : '';
         return `• ${q}x ${pName}${opts}${n}`;
       }).join('\n');
@@ -299,15 +278,16 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
 
-        // Kurye uygulamasının siparişi havuza düşürmesi için düzeltildi
-        durum: { stringValue: 'Havuzda Bekliyor' },
-        status: { stringValue: 'Havuzda Bekliyor' },
-        havuzdaMi: { booleanValue: true },
+        // Sıralama kuralı: İlk olarak Web Paneline Düşer
+        durum: { stringValue: 'YENI' },
+        status: { stringValue: 'YENI' },
+        havuzdaMi: { booleanValue: false },
         kuryeId: { stringValue: '' },
 
         musteriAdi: { stringValue: mAd },
         customerName: { stringValue: mAd },
         musteriTelefon: { stringValue: mTel },
+        musteriTel: { stringValue: mTel },
         telefon: { stringValue: mTel },
         phone: { stringValue: mTel },
         pinKodu: { stringValue: mPin },
@@ -329,6 +309,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         restoranBoylam: { doubleValue: isletmeInfo.restoranBoylam },
 
         detay: { stringValue: urunMetni },
+        sepetDetay: { stringValue: urunMetni },
         urunler: { stringValue: urunMetni },
 
         tarih: { timestampValue: nowIso },
@@ -349,9 +330,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
   }
 });
 
-// =====================================================================
-// 4. KURYE MOBİL UYGULAMASI DURUM GÜNCELLEME
-// =====================================================================
+// 4. DURUM GÜNCELLEME
 app.post('/update-order-status', async (req, res) => {
   try {
     const { siparisId, durum } = req.body;
