@@ -152,7 +152,7 @@ app.post('/webhook/trendyol', async (req, res) => {
         }
         
         const n = l.notes || l.note ? ` [Not: ${l.notes || l.note}]` : '';
-        return `${q}x ${pName}${opts}${n}`;
+        return `• ${q}x ${pName}${opts}${n}`;
       }).join('\n');
     } else if (data.detay) {
       urunMetni = String(data.detay);
@@ -175,9 +175,10 @@ app.post('/webhook/trendyol', async (req, res) => {
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
 
-        durum: { stringValue: 'YENI' },
-        status: { stringValue: 'YENI' },
-        havuzdaMi: { booleanValue: false },
+        // Kurye uygulamasının siparişi havuza düşürmesi için düzeltildi
+        durum: { stringValue: 'Havuzda Bekliyor' },
+        status: { stringValue: 'Havuzda Bekliyor' },
+        havuzdaMi: { booleanValue: true },
         kuryeId: { stringValue: '' },
 
         musteriAdi: { stringValue: mAd },
@@ -275,7 +276,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         }
 
         const n = i.notes || i.note ? ` [Not: ${i.notes || i.note}]` : '';
-        return `${q}x ${pName}${opts}${n}`;
+        return `• ${q}x ${pName}${opts}${n}`;
       }).join('\n');
     } else if (data.detay) {
       urunMetni = String(data.detay);
@@ -298,9 +299,10 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
 
-        durum: { stringValue: 'YENI' },
-        status: { stringValue: 'YENI' },
-        havuzdaMi: { booleanValue: false },
+        // Kurye uygulamasının siparişi havuza düşürmesi için düzeltildi
+        durum: { stringValue: 'Havuzda Bekliyor' },
+        status: { stringValue: 'Havuzda Bekliyor' },
+        havuzdaMi: { booleanValue: true },
         kuryeId: { stringValue: '' },
 
         musteriAdi: { stringValue: mAd },
