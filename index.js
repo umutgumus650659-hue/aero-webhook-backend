@@ -25,8 +25,8 @@ async function getIsletmeBilgileri(targetId) {
 
   let isletmeEmail = '';
   let isletmeAdi = '';
-  let restoranEnlem = 0.0;
-  let restoranBoylam = 0.0;
+  let restoranEnlem = 41.6771;
+  let restoranBoylam = 26.5557;
 
   const queryBody = {
     structuredQuery: {
@@ -54,7 +54,7 @@ async function getIsletmeBilgileri(targetId) {
     const results = await response.json();
     if (results && results[0] && results[0].document && results[0].document.fields) {
       const fields = results[0].document.fields;
-      
+
       if (fields.isletmeEmail && fields.isletmeEmail.stringValue) {
         isletmeEmail = fields.isletmeEmail.stringValue.toLowerCase().trim();
       }
@@ -64,10 +64,10 @@ async function getIsletmeBilgileri(targetId) {
         isletmeAdi = fields.unvan.stringValue;
       }
       if (fields.enlem) {
-        restoranEnlem = Number(fields.enlem.doubleValue || fields.enlem.integerValue || 0);
+        restoranEnlem = Number(fields.enlem.doubleValue || fields.enlem.integerValue || 41.6771);
       }
       if (fields.boylam) {
-        restoranBoylam = Number(fields.boylam.doubleValue || fields.boylam.integerValue || 0);
+        restoranBoylam = Number(fields.boylam.doubleValue || fields.boylam.integerValue || 26.5557);
       }
     }
   }
@@ -76,7 +76,7 @@ async function getIsletmeBilgileri(targetId) {
     throw new Error(`ID: ${targetId} için eşleşen aktif işletme bulunamadı.`);
   }
 
-  return { isletmeEmail, isletmeAdi, restoranEnlem, restoranBoylam };
+  return { isletmeEmail, isletmeAdi: isletmeAdi || 'KOMAGENE', restoranEnlem, restoranBoylam };
 }
 
 function parseOdemeTipi(paymentType, isPaid) {
@@ -106,23 +106,29 @@ app.post('/webhook/trendyol', async (req, res) => {
     const mAd = String(
       customerObj.firstName 
         ? `${customerObj.firstName} ${customerObj.lastName || ''}`.trim() 
-        : (data.musteriAdi || data.customerName || 'Müşteri')
+        : (data.musteriAdi || data.customerName || 'Trendyol Müşterisi')
     );
-    const mTel = String(customerObj.phone || data.telefon || data.phone || data.customerPhone || '');
+    const mTel = String(customerObj.phone || data.telefon || data.phone || data.customerPhone || '08502220000');
     const mPin = String(customerObj.pin || data.pinKodu || data.pin || customerObj.extension || '');
 
     const addrObj = data.shipmentAddress || data.deliveryAddress || data.address || {};
-    const mAdres = String(
+    let mAdres = String(
       addrObj.fullAddress || 
       addrObj.addressLine1 || 
       `${addrObj.address1 || ''} ${addrObj.address2 || ''}`.trim() || 
       data.adres || 
       'Adres Belirtilmedi'
     );
+    if (addrObj.district || addrObj.city) {
+      mAdres += ` (${addrObj.district || ''} / ${addrObj.city || ''})`.trim();
+    }
+
     const mNot = String(data.note || data.customerNote || addrObj.note || data.siparisNotu || '');
 
-    const latVal = Number(addrObj.latitude || data.latitude || data.lat || 0);
-    const lngVal = Number(addrObj.longitude || data.longitude || data.lng || 0);
+    let latVal = Number(addrObj.latitude || data.latitude || data.lat || 0);
+    let lngVal = Number(addrObj.longitude || data.longitude || data.lng || 0);
+    if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
+    if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
     const rawPayment = data.paymentType || data.paymentMethod || data.paymentMode || 'Online';
     const odemeYontemi = parseOdemeTipi(rawPayment, true);
@@ -144,14 +150,15 @@ app.post('/webhook/trendyol', async (req, res) => {
       urunMetni = String(data.detay);
     }
 
+    // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI VERİ ŞEMASI (SCHEMA)
     const firestoreDocument = {
       fields: {
         siparisNo: { stringValue: String(data.orderNumber || data.siparisNo || data.id || 'TR-' + Date.now()) },
         sistemFiltresi: { stringValue: 'AERO_WEB_OZEL' },
         
         isletmeEmail: { stringValue: isletmeInfo.isletmeEmail },
-        isletmeAdi: { stringValue: isletmeInfo.isletmeAdi },
-        marketAdi: { stringValue: isletmeInfo.isletmeAdi },
+        isletmeAdi: { stringValue: isletmeInfo.isletmeAdi.toUpperCase() },
+        marketAdi: { stringValue: isletmeInfo.isletmeAdi.toUpperCase() },
         supplierId: { stringValue: targetSupplierId },
         
         kaynak: { stringValue: 'Trendyol' },
@@ -161,11 +168,14 @@ app.post('/webhook/trendyol', async (req, res) => {
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
 
-        // Sıralama kuralı: İlk olarak Web Paneline Düşer
+        // Telefon siparişi durum standardı
         durum: { stringValue: 'YENI' },
         status: { stringValue: 'YENI' },
+        isHazir: { booleanValue: false },
+        isWebArsiv: { booleanValue: false },
         havuzdaMi: { booleanValue: false },
         kuryeId: { stringValue: '' },
+        kuryeAdi: { stringValue: '' },
 
         musteriAdi: { stringValue: mAd },
         customerName: { stringValue: mAd },
@@ -228,16 +238,22 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     const tutarVal = Number(data.price?.total || data.totalAmount || data.totalPrice || data.tutar || 0);
 
     const customerObj = data.customer || {};
-    const mAd = String(customerObj.name || customerObj.firstName || data.customerName || data.musteriAdi || 'Müşteri');
+    const mAd = String(customerObj.name || customerObj.firstName || data.customerName || data.musteriAdi || 'Yemeksepeti Müşterisi');
     const mTel = String(customerObj.phone || data.delivery?.phone || data.telefon || data.phone || '');
     const mPin = String(customerObj.pin || customerObj.extension || data.pinKodu || data.pin || '');
 
     const deliv = data.delivery || data.address || {};
-    const mAdres = String(deliv.address || deliv.fullAddress || data.adres || data.address || 'Adres Belirtilmedi');
+    let mAdres = String(deliv.address || deliv.fullAddress || data.adres || data.address || 'Adres Belirtilmedi');
+    if (deliv.district || deliv.city) {
+      mAdres += ` (${deliv.district || ''} / ${deliv.city || ''})`.trim();
+    }
+
     const mNot = String(data.notes || data.customerNote || deliv.note || data.siparisNotu || '');
 
-    const latVal = Number(deliv.location?.lat || deliv.location?.latitude || deliv.latitude || data.latitude || data.lat || 0);
-    const lngVal = Number(deliv.location?.lng || deliv.location?.longitude || deliv.longitude || data.longitude || data.lng || 0);
+    let latVal = Number(deliv.location?.lat || deliv.location?.latitude || deliv.latitude || data.latitude || data.lat || 0);
+    let lngVal = Number(deliv.location?.lng || deliv.location?.longitude || deliv.longitude || data.longitude || data.lng || 0);
+    if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
+    if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
     const rawPayment = data.paymentMethod || data.paymentType || data.paymentMode || 'Online';
     const odemeYontemi = parseOdemeTipi(rawPayment, data.isPaid !== false);
@@ -261,14 +277,15 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       urunMetni = String(data.detay);
     }
 
+    // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI VERİ ŞEMASI (SCHEMA)
     const firestoreDocument = {
       fields: {
         siparisNo: { stringValue: String(data.orderCode || data.siparisNo || data.id || 'YS-' + Date.now()) },
         sistemFiltresi: { stringValue: 'AERO_WEB_OZEL' },
 
         isletmeEmail: { stringValue: isletmeInfo.isletmeEmail },
-        isletmeAdi: { stringValue: isletmeInfo.isletmeAdi },
-        marketAdi: { stringValue: isletmeInfo.isletmeAdi },
+        isletmeAdi: { stringValue: isletmeInfo.isletmeAdi.toUpperCase() },
+        marketAdi: { stringValue: isletmeInfo.isletmeAdi.toUpperCase() },
         restaurantId: { stringValue: targetRestaurantId },
 
         kaynak: { stringValue: 'Yemeksepeti' },
@@ -278,11 +295,14 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
 
-        // Sıralama kuralı: İlk olarak Web Paneline Düşer
+        // Telefon siparişi durum standardı
         durum: { stringValue: 'YENI' },
         status: { stringValue: 'YENI' },
+        isHazir: { booleanValue: false },
+        isWebArsiv: { booleanValue: false },
         havuzdaMi: { booleanValue: false },
         kuryeId: { stringValue: '' },
+        kuryeAdi: { stringValue: '' },
 
         musteriAdi: { stringValue: mAd },
         customerName: { stringValue: mAd },
