@@ -141,9 +141,8 @@ app.post('/webhook/trendyol', async (req, res) => {
       urunMetni = rawLines.map(l => {
         const q = Number(l.quantity || l.count || 1);
         const pName = l.productName || l.name || 'Ürün';
-        const priceVal = Number(l.price || l.unitPrice || tutarVal / rawLines.length || 0);
+        const priceVal = Number(l.price || l.unitPrice || (tutarVal > 0 ? tutarVal / rawLines.length : 0));
 
-        // Kurye uygulamasının beklediği "sepet" dizisi oluşturuluyor
         sepetArray.push({
           mapValue: {
             fields: {
@@ -174,7 +173,7 @@ app.post('/webhook/trendyol', async (req, res) => {
       });
     }
 
-    // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI VERİ ŞEMASI (SCHEMA)
+    // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI İLK SİPARİŞ DURUMU
     const firestoreDocument = {
       fields: {
         siparisNo: { stringValue: String(data.orderNumber || data.siparisNo || data.id || 'TR-' + Date.now()) },
@@ -192,10 +191,8 @@ app.post('/webhook/trendyol', async (req, res) => {
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
 
-        // Kurye uygulamasını çökmekten kurtaran kritik "sepet" dizisi
         sepet: { arrayValue: { values: sepetArray } },
 
-        // Telefon siparişi durum standardı
         durum: { stringValue: 'YENI' },
         status: { stringValue: 'YENI' },
         isHazir: { booleanValue: false },
@@ -293,9 +290,8 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       urunMetni = rawItems.map(i => {
         const q = Number(i.quantity || i.count || 1);
         const pName = i.name || i.productName || 'Ürün';
-        const priceVal = Number(i.price || i.unitPrice || tutarVal / rawItems.length || 0);
+        const priceVal = Number(i.price || i.unitPrice || (tutarVal > 0 ? tutarVal / rawItems.length : 0));
 
-        // Kurye uygulamasının beklediği "sepet" dizisi oluşturuluyor
         sepetArray.push({
           mapValue: {
             fields: {
@@ -328,7 +324,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       });
     }
 
-    // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI VERİ ŞEMASI (SCHEMA)
+    // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI İLK SİPARİŞ DURUMU
     const firestoreDocument = {
       fields: {
         siparisNo: { stringValue: String(data.orderCode || data.siparisNo || data.id || 'YS-' + Date.now()) },
@@ -346,10 +342,8 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
 
-        // Kurye uygulamasını çökmekten kurtaran kritik "sepet" dizisi
         sepet: { arrayValue: { values: sepetArray } },
 
-        // Telefon siparişi durum standardı
         durum: { stringValue: 'YENI' },
         status: { stringValue: 'YENI' },
         isHazir: { booleanValue: false },
