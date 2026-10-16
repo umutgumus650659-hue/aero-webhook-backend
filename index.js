@@ -134,11 +134,26 @@ app.post('/webhook/trendyol', async (req, res) => {
     const odemeYontemi = parseOdemeTipi(rawPayment, true);
 
     let urunMetni = '';
+    const sepetArray = [];
     const rawLines = data.lines || data.items || data.products || [];
+
     if (Array.isArray(rawLines) && rawLines.length > 0) {
       urunMetni = rawLines.map(l => {
-        const q = l.quantity || l.count || 1;
+        const q = Number(l.quantity || l.count || 1);
         const pName = l.productName || l.name || 'Ürün';
+        const priceVal = Number(l.price || l.unitPrice || tutarVal / rawLines.length || 0);
+
+        // Kurye uygulamasının beklediği "sepet" dizisi oluşturuluyor
+        sepetArray.push({
+          mapValue: {
+            fields: {
+              isim: { stringValue: pName },
+              adet: { integerValue: String(q) },
+              fiyat: { doubleValue: priceVal }
+            }
+          }
+        });
+
         let opts = '';
         if (Array.isArray(l.options) && l.options.length > 0) {
           opts = ` (${l.options.map(o => o.name || o).join(', ')})`;
@@ -146,8 +161,17 @@ app.post('/webhook/trendyol', async (req, res) => {
         const n = l.notes || l.note ? ` [Not: ${l.notes || l.note}]` : '';
         return `• ${q}x ${pName}${opts}${n}`;
       }).join('\n');
-    } else if (data.detay) {
-      urunMetni = String(data.detay);
+    } else {
+      urunMetni = String(data.detay || '• 1x Sipariş Ürünü');
+      sepetArray.push({
+        mapValue: {
+          fields: {
+            isim: { stringValue: 'Sipariş Ürünü' },
+            adet: { integerValue: "1" },
+            fiyat: { doubleValue: tutarVal }
+          }
+        }
+      });
     }
 
     // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI VERİ ŞEMASI (SCHEMA)
@@ -167,6 +191,9 @@ app.post('/webhook/trendyol', async (req, res) => {
 
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
+
+        // Kurye uygulamasını çökmekten kurtaran kritik "sepet" dizisi
+        sepet: { arrayValue: { values: sepetArray } },
 
         // Telefon siparişi durum standardı
         durum: { stringValue: 'YENI' },
@@ -259,11 +286,26 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     const odemeYontemi = parseOdemeTipi(rawPayment, data.isPaid !== false);
 
     let urunMetni = '';
+    const sepetArray = [];
     const rawItems = data.items || data.products || [];
+
     if (Array.isArray(rawItems) && rawItems.length > 0) {
       urunMetni = rawItems.map(i => {
-        const q = i.quantity || i.count || 1;
+        const q = Number(i.quantity || i.count || 1);
         const pName = i.name || i.productName || 'Ürün';
+        const priceVal = Number(i.price || i.unitPrice || tutarVal / rawItems.length || 0);
+
+        // Kurye uygulamasının beklediği "sepet" dizisi oluşturuluyor
+        sepetArray.push({
+          mapValue: {
+            fields: {
+              isim: { stringValue: pName },
+              adet: { integerValue: String(q) },
+              fiyat: { doubleValue: priceVal }
+            }
+          }
+        });
+
         let opts = '';
         if (Array.isArray(i.options) && i.options.length > 0) {
           opts = ` (${i.options.map(o => o.name || o).join(', ')})`;
@@ -273,8 +315,17 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         const n = i.notes || i.note ? ` [Not: ${i.notes || i.note}]` : '';
         return `• ${q}x ${pName}${opts}${n}`;
       }).join('\n');
-    } else if (data.detay) {
-      urunMetni = String(data.detay);
+    } else {
+      urunMetni = String(data.detay || '• 1x Sipariş Ürünü');
+      sepetArray.push({
+        mapValue: {
+          fields: {
+            isim: { stringValue: 'Sipariş Ürünü' },
+            adet: { integerValue: "1" },
+            fiyat: { doubleValue: tutarVal }
+          }
+        }
+      });
     }
 
     // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI VERİ ŞEMASI (SCHEMA)
@@ -294,6 +345,9 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 
         tutar: { doubleValue: tutarVal },
         toplamTutar: { doubleValue: tutarVal },
+
+        // Kurye uygulamasını çökmekten kurtaran kritik "sepet" dizisi
+        sepet: { arrayValue: { values: sepetArray } },
 
         // Telefon siparişi durum standardı
         durum: { stringValue: 'YENI' },
