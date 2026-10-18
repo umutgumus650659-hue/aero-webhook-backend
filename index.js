@@ -79,6 +79,99 @@ async function getIsletmeBilgileri(targetId) {
   return { isletmeEmail, isletmeAdi: isletmeAdi || 'KOMAGENE', restoranEnlem, restoranBoylam };
 }
 
+// ----------------------------------------------------
+// PLATFORMLARA CANLI GERİ BİLDİRİM GÖNDERME SERVİSLERİ
+// ----------------------------------------------------
+
+// İşletmenin API Anahtarlarını Firestore'dan Çekme Yardımcısı
+async function getIsletmeEntegrasyonByEmail(email) {
+  if (!email) return null;
+  try {
+    const response = await fetch(`${FIRESTORE_BASE_URL}/isletme_entegrasyonlar/${email.toLowerCase().trim()}`);
+    if (response.ok) {
+      const doc = await response.json();
+      if (doc && doc.fields) {
+        const fields = doc.fields;
+        return {
+          trSupplierId: fields.trSupplierId?.stringValue || '',
+          trApiKey: fields.trApiKey?.stringValue || '',
+          trApiSecret: fields.trApiSecret?.stringValue || '',
+          ysRestoranId: fields.ysRestoranId?.stringValue || '',
+          ysToken: fields.ysToken?.stringValue || ''
+        };
+      }
+    }
+  } catch (e) {
+    console.error('Entegrasyon anahtarı okuma hatası:', e.message);
+  }
+  return null;
+}
+
+// Trendyol GO Canlı Status Güncelleme
+async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
+  try {
+    let tyStatus = 'Picking';
+    const dLower = String(durum).toLowerCase();
+
+    if (dLower.includes('hazır') || dLower.includes('hazirlan')) {
+      tyStatus = 'Picking';
+    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye')) {
+      tyStatus = 'InDelivery';
+    } else if (dLower.includes('teslim')) {
+      tyStatus = 'Delivered';
+    }
+
+    const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
+    
+    // Trendyol Supplier Order Status API Endpoint
+    const url = `https://api.trendyol.com/sapigw/suppliers/${supplierId}/orders/${orderId}/status`;
+    
+    await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': authHeader,
+        'User-Agent': `${supplierId} - SelfIntegration`
+      },
+      body: JSON.stringify({ status: tyStatus })
+    });
+    console.log(`Trendyol Sipariş (${orderId}) Durumu Güncellendi: ${tyStatus} 🟢`);
+  } catch (e) {
+    console.error('Trendyol Status Bildirim Hatası:', e.message);
+  }
+}
+
+// Yemeksepeti Canlı Status Güncelleme
+async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKeys) {
+  try {
+    let ysStatus = 'in_preparation';
+    const dLower = String(durum).toLowerCase();
+
+    if (dLower.includes('hazır') || dLower.includes('hazirlan')) {
+      ysStatus = 'in_preparation';
+    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye')) {
+      ysStatus = 'in_delivery';
+    } else if (dLower.includes('teslim')) {
+      ysStatus = 'delivered';
+    }
+
+    // Delivery Hero / Yemeksepeti Connect Status Endpoint
+    const url = `https://connect.deliveryhero.com/api/v1/vendors/${restaurantId}/orders/${orderCode}/status`;
+    
+    await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKeys.ysToken}`
+      },
+      body: JSON.stringify({ status: ysStatus })
+    });
+    console.log(`Yemeksepeti Sipariş (${orderCode}) Durumu Güncellendi: ${ysStatus} 🟢`);
+  } catch (e) {
+    console.error('Yemeksepeti Status Bildirim Hatası:', e.message);
+  }
+}
+
 function parseOdemeTipi(paymentType, isPaid) {
   if (!paymentType) return isPaid ? 'Online Ödeme' : 'Nakit';
   const pStr = String(paymentType).toLowerCase();
@@ -425,14 +518,15 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
   }
 });
 
-// 4. DURUM GÜNCELLEME
+// 4. DURUM GÜNCELLEME VEYA GERİ BİLDİRİM TETİKLEME
 app.post('/update-order-status', async (req, res) => {
   try {
-    const { siparisId, durum } = req.body;
+    const { siparisId, durum, kanal, isletmeEmail } = req.body;
     if (!siparisId || !durum) {
       return res.status(400).json({ error: 'siparisId ve durum parametreleri zorunludur.' });
     }
 
+    // A. Firestore üzerindeki sipariş durumunu güncelle
     const updateBody = {
       fields: {
         durum: { stringValue: durum },
@@ -445,6 +539,20 @@ app.post('/update-order-status', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updateBody)
     });
+
+    // B. Platformlara (Trendyol / Yemeksepeti) Arka Planda Canlı Geri Bildirim Atma
+    if (isletmeEmail && kanal) {
+      getIsletmeEntegrasyonByEmail(isletmeEmail).then(apiKeys => {
+        if (!apiKeys) return;
+
+        const kLower = String(kanal).toLowerCase();
+        if (kLower.includes('trendyol') && apiKeys.trSupplierId && apiKeys.trApiKey) {
+          sendTrendyolStatusUpdate(apiKeys.trSupplierId, siparisId, durum, apiKeys);
+        } else if (kLower.includes('yemeksepeti') && apiKeys.ysRestoranId && apiKeys.ysToken) {
+          sendYemeksepetiStatusUpdate(apiKeys.ysRestoranId, siparisId, durum, apiKeys);
+        }
+      }).catch(err => console.error('Geri bildirim hazırlık hatası:', err.message));
+    }
 
     return res.json({ success: true });
   } catch (error) {
