@@ -109,7 +109,9 @@ app.post('/webhook/trendyol', async (req, res) => {
         : (data.musteriAdi || data.customerName || 'Trendyol Müşterisi')
     );
     const mTel = String(customerObj.phone || data.telefon || data.phone || data.customerPhone || '08502220000');
-    const mPin = String(customerObj.pin || data.pinKodu || data.pin || customerObj.extension || '');
+    
+    // PIN Kodu - pinCode, pin, pinKodu tam yakalama
+    const mPin = String(customerObj.pinCode || customerObj.pin || customerObj.extension || data.pinKodu || data.pin || '');
 
     const addrObj = data.shipmentAddress || data.deliveryAddress || data.address || {};
     let mAdres = String(
@@ -123,7 +125,7 @@ app.post('/webhook/trendyol', async (req, res) => {
       mAdres += ` (${addrObj.district || ''} / ${addrObj.city || ''})`.trim();
     }
 
-    const mNot = String(data.note || data.customerNote || addrObj.note || data.siparisNotu || '');
+    const mNot = String(data.note || data.customerNote || addrObj.note || addrObj.notes || data.siparisNotu || '');
 
     let latVal = Number(addrObj.latitude || data.latitude || data.lat || 0);
     let lngVal = Number(addrObj.longitude || data.longitude || data.lng || 0);
@@ -135,13 +137,15 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     let urunMetni = '';
     const sepetArray = [];
-    const rawLines = data.lines || data.items || data.products || [];
+    
+    // Trendyol paketlerinin asıl ürün dizisi: packageItems
+    const rawLines = data.packageItems || data.lines || data.items || data.products || [];
 
     if (Array.isArray(rawLines) && rawLines.length > 0) {
       urunMetni = rawLines.map(l => {
-        const q = Number(l.quantity || l.count || 1);
-        const pName = l.productName || l.name || 'Ürün';
-        const priceVal = Number(l.price || l.unitPrice || (tutarVal > 0 ? tutarVal / rawLines.length : 0));
+        const q = Number(l.quantity || l.count || l.adet || 1);
+        const pName = l.productName || l.name || l.isim || 'Ürün';
+        const priceVal = Number(l.price || l.unitPrice || l.fiyat || (tutarVal > 0 ? tutarVal / rawLines.length : 0));
 
         sepetArray.push({
           mapValue: {
@@ -155,7 +159,7 @@ app.post('/webhook/trendyol', async (req, res) => {
 
         let opts = '';
         if (Array.isArray(l.options) && l.options.length > 0) {
-          opts = ` (${l.options.map(o => o.name || o).join(', ')})`;
+          opts = ` (${l.options.map(o => (typeof o === 'object' ? (o.name || o.value || o) : o)).join(', ')})`;
         }
         const n = l.notes || l.note ? ` [Not: ${l.notes || l.note}]` : '';
         return `• ${q}x ${pName}${opts}${n}`;
@@ -173,10 +177,9 @@ app.post('/webhook/trendyol', async (req, res) => {
       });
     }
 
-    // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI İLK SİPARİŞ DURUMU
     const firestoreDocument = {
       fields: {
-        siparisNo: { stringValue: String(data.orderNumber || data.siparisNo || data.id || 'TR-' + Date.now()) },
+        siparisNo: { stringValue: String(data.orderId || data.orderNumber || data.siparisNo || data.id || 'TR-' + Date.now()) },
         sistemFiltresi: { stringValue: 'AERO_WEB_OZEL' },
         
         isletmeEmail: { stringValue: isletmeInfo.isletmeEmail },
@@ -251,46 +254,72 @@ app.post('/webhook/trendyol', async (req, res) => {
 app.post('/webhook/yemeksepeti', async (req, res) => {
   try {
     const data = req.body;
-    const targetRestaurantId = String(data.restaurantId || data.vendorId || data.supplierId || '');
+    const orderObj = data.order || {}; // Yemeksepeti order katmanı
+    
+    const targetRestaurantId = String(data.vendor_id || data.restaurantId || data.vendorId || data.supplierId || '');
 
     if (!targetRestaurantId) {
-      return res.status(400).json({ error: 'restaurantId eksik.' });
+      return res.status(400).json({ error: 'restaurantId / vendor_id eksik.' });
     }
 
     const isletmeInfo = await getIsletmeBilgileri(targetRestaurantId);
     const nowIso = new Date().toISOString();
-    const tutarVal = Number(data.price?.total || data.totalAmount || data.totalPrice || data.tutar || 0);
+    
+    const tutarVal = Number(
+      orderObj.price?.grand_total || 
+      data.price?.total || 
+      data.totalAmount || 
+      data.totalPrice || 
+      0
+    );
 
-    const customerObj = data.customer || {};
-    const mAd = String(customerObj.name || customerObj.firstName || data.customerName || data.musteriAdi || 'Yemeksepeti Müşterisi');
-    const mTel = String(customerObj.phone || data.delivery?.phone || data.telefon || data.phone || '');
-    const mPin = String(customerObj.pin || customerObj.extension || data.pinKodu || data.pin || '');
+    const customerObj = orderObj.customer || data.customer || {};
+    const mAd = String(
+      customerObj.first_name 
+        ? `${customerObj.first_name} ${customerObj.last_name || ''}`.trim()
+        : (customerObj.name || customerObj.firstName || data.customerName || 'Yemeksepeti Müşterisi')
+    );
+    const mTel = String(customerObj.phone || data.delivery?.phone || data.telefon || '08508880000');
+    
+    // Yemeksepeti extension_code / pinKodu
+    const mPin = String(customerObj.extension_code || customerObj.pinCode || customerObj.pin || customerObj.extension || data.pinKodu || '');
 
-    const deliv = data.delivery || data.address || {};
-    let mAdres = String(deliv.address || deliv.fullAddress || data.adres || data.address || 'Adres Belirtilmedi');
-    if (deliv.district || deliv.city) {
-      mAdres += ` (${deliv.district || ''} / ${deliv.city || ''})`.trim();
+    const delivObj = orderObj.delivery || data.delivery || data.address || {};
+    const delivAddr = delivObj.address || delivObj;
+    
+    let mAdres = String(
+      delivAddr.full_address || 
+      delivAddr.fullAddress || 
+      delivAddr.address || 
+      `${delivAddr.street || ''} No:${delivAddr.building_number || ''} D:${delivAddr.flat_number || ''}`.trim() || 
+      data.adres || 
+      'Adres Belirtilmedi'
+    );
+    if (delivAddr.district || delivAddr.city) {
+      mAdres += ` (${delivAddr.district || ''} / ${delivAddr.city || ''})`.trim();
     }
 
-    const mNot = String(data.notes || data.customerNote || deliv.note || data.siparisNotu || '');
+    const mNot = String(delivObj.instructions || data.notes || data.customerNote || delivAddr.note || '');
 
-    let latVal = Number(deliv.location?.lat || deliv.location?.latitude || deliv.latitude || data.latitude || data.lat || 0);
-    let lngVal = Number(deliv.location?.lng || deliv.location?.longitude || deliv.longitude || data.longitude || data.lng || 0);
+    let latVal = Number(delivAddr.latitude || delivAddr.lat || delivObj.location?.lat || 0);
+    let lngVal = Number(delivAddr.longitude || delivAddr.lng || delivObj.location?.lng || 0);
     if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
     if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
-    const rawPayment = data.paymentMethod || data.paymentType || data.paymentMode || 'Online';
+    const rawPayment = orderObj.payment?.type || data.paymentMethod || data.paymentType || 'Online';
     const odemeYontemi = parseOdemeTipi(rawPayment, data.isPaid !== false);
 
     let urunMetni = '';
     const sepetArray = [];
-    const rawItems = data.items || data.products || [];
+    
+    // Yemeksepeti order.products veya items
+    const rawItems = orderObj.products || data.items || data.products || [];
 
     if (Array.isArray(rawItems) && rawItems.length > 0) {
       urunMetni = rawItems.map(i => {
-        const q = Number(i.quantity || i.count || 1);
+        const q = Number(i.quantity || i.count || i.adet || 1);
         const pName = i.name || i.productName || 'Ürün';
-        const priceVal = Number(i.price || i.unitPrice || (tutarVal > 0 ? tutarVal / rawItems.length : 0));
+        const priceVal = Number(i.unit_price || i.price || i.unitPrice || (tutarVal > 0 ? tutarVal / rawItems.length : 0));
 
         sepetArray.push({
           mapValue: {
@@ -303,10 +332,9 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         });
 
         let opts = '';
-        if (Array.isArray(i.options) && i.options.length > 0) {
-          opts = ` (${i.options.map(o => o.name || o).join(', ')})`;
-        } else if (Array.isArray(i.selectedToppings) && i.selectedToppings.length > 0) {
-          opts = ` (${i.selectedToppings.map(t => t.name || t).join(', ')})`;
+        const selectedOpts = i.selected_options || i.options || i.selectedToppings;
+        if (Array.isArray(selectedOpts) && selectedOpts.length > 0) {
+          opts = ` (${selectedOpts.map(o => (typeof o === 'object' ? (o.value || o.name || o) : o)).join(', ')})`;
         }
         const n = i.notes || i.note ? ` [Not: ${i.notes || i.note}]` : '';
         return `• ${q}x ${pName}${opts}${n}`;
@@ -324,10 +352,9 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       });
     }
 
-    // TELEFON SİPARİŞİ İLE %100 BİREBİR AYNI İLK SİPARİŞ DURUMU
     const firestoreDocument = {
       fields: {
-        siparisNo: { stringValue: String(data.orderCode || data.siparisNo || data.id || 'YS-' + Date.now()) },
+        siparisNo: { stringValue: String(orderObj.code || orderObj.id || data.orderCode || data.siparisNo || 'YS-' + Date.now()) },
         sistemFiltresi: { stringValue: 'AERO_WEB_OZEL' },
 
         isletmeEmail: { stringValue: isletmeInfo.isletmeEmail },
