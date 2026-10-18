@@ -107,18 +107,18 @@ async function getIsletmeEntegrasyonByEmail(email) {
   return null;
 }
 
-// Trendyol GO Canlı Status Güncelleme
+// Trendyol GO Canlı Status Güncelleme (Akıllı Haritalamalı)
 async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
   try {
     let tyStatus = 'Picking';
-    const dLower = String(durum).toLowerCase();
+    const dLower = String(durum).toLowerCase().trim();
 
-    if (dLower.includes('hazır') || dLower.includes('hazirlan')) {
-      tyStatus = 'Picking';
-    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye')) {
-      tyStatus = 'InDelivery';
-    } else if (dLower.includes('teslim')) {
+    if (dLower.includes('teslim')) {
       tyStatus = 'Delivered';
+    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) {
+      tyStatus = 'InDelivery';
+    } else if (dLower.includes('hazır') || dLower.includes('hazirlan') || dLower.includes('havuz') || dLower.includes('bekliyor')) {
+      tyStatus = 'Picking';
     }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
@@ -135,24 +135,24 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
       },
       body: JSON.stringify({ status: tyStatus })
     });
-    console.log(`Trendyol Sipariş (${orderId}) Durumu Güncellendi: ${tyStatus} 🟢`);
+    console.log(`Trendyol Sipariş (${orderId}) [Web Durumu: "${durum}"] -> Trendyol API: ${tyStatus} 🟢`);
   } catch (e) {
     console.error('Trendyol Status Bildirim Hatası:', e.message);
   }
 }
 
-// Yemeksepeti Canlı Status Güncelleme
+// Yemeksepeti Canlı Status Güncelleme (Akıllı Haritalamalı)
 async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKeys) {
   try {
     let ysStatus = 'in_preparation';
-    const dLower = String(durum).toLowerCase();
+    const dLower = String(durum).toLowerCase().trim();
 
-    if (dLower.includes('hazır') || dLower.includes('hazirlan')) {
-      ysStatus = 'in_preparation';
-    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye')) {
-      ysStatus = 'in_delivery';
-    } else if (dLower.includes('teslim')) {
+    if (dLower.includes('teslim')) {
       ysStatus = 'delivered';
+    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) {
+      ysStatus = 'in_delivery';
+    } else if (dLower.includes('hazır') || dLower.includes('hazirlan') || dLower.includes('havuz') || dLower.includes('bekliyor')) {
+      ysStatus = 'in_preparation';
     }
 
     // Delivery Hero / Yemeksepeti Connect Status Endpoint
@@ -166,7 +166,7 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
       },
       body: JSON.stringify({ status: ysStatus })
     });
-    console.log(`Yemeksepeti Sipariş (${orderCode}) Durumu Güncellendi: ${ysStatus} 🟢`);
+    console.log(`Yemeksepeti Sipariş (${orderCode}) [Web Durumu: "${durum}"] -> Yemeksepeti API: ${ysStatus} 🟢`);
   } catch (e) {
     console.error('Yemeksepeti Status Bildirim Hatası:', e.message);
   }
