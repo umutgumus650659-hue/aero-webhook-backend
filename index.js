@@ -193,7 +193,19 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     const isletmeInfo = await getIsletmeBilgileri(targetSupplierId);
     const nowIso = new Date().toISOString();
-    const tutarVal = Number(data.totalPrice || data.grossAmount || data.settlementAmount || data.tutar || 0);
+    
+    // 🚀 AKILLI TUTAR AYRIŞTIRMA (payment.totalPrice dâhil tüm yapılar kontrol edilir)
+    const paymentObj = data.payment || {};
+    const tutarVal = Number(
+      paymentObj.totalPrice || 
+      paymentObj.price || 
+      data.totalPrice || 
+      data.grossAmount || 
+      data.settlementAmount || 
+      data.toplamTutar || 
+      data.tutar || 
+      0
+    );
 
     const customerObj = data.customer || {};
     const mAd = String(
@@ -225,13 +237,13 @@ app.post('/webhook/trendyol', async (req, res) => {
     if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
     if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
-    const rawPayment = data.paymentType || data.paymentMethod || data.paymentMode || 'Online';
+    const rawPayment = paymentObj.paymentType || data.paymentType || data.paymentMethod || data.paymentMode || 'Online';
     const odemeYontemi = parseOdemeTipi(rawPayment, true);
 
     let urunMetni = '';
     const sepetArray = [];
     
-    // Trendyol paketlerinin asıl ürün dizisi: packageItems
+    // Trendyol paketlerinin asıl ürün dizisi: packageItems veya items
     const rawLines = data.packageItems || data.lines || data.items || data.products || [];
 
     if (Array.isArray(rawLines) && rawLines.length > 0) {
@@ -252,7 +264,7 @@ app.post('/webhook/trendyol', async (req, res) => {
 
         let opts = '';
         if (Array.isArray(l.options) && l.options.length > 0) {
-          opts = ` (${l.options.map(o => (typeof o === 'object' ? (o.name || o.value || o) : o)).join(', ')})`;
+          opts = ` (${l.options.map(o => (typeof o === 'object' ? (o.optionName || o.name || o.value || o) : o)).join(', ')})`;
         }
         const n = l.notes || l.note ? ` [Not: ${l.notes || l.note}]` : '';
         return `• ${q}x ${pName}${opts}${n}`;
