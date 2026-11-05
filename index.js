@@ -18,13 +18,13 @@ app.post('/validate-api', (req, res) => {
 });
 
 // 1. DİNAMİK İŞLETME BİLGİSİ ÇEKME
-async function getIsletmeBilgileri(targetId) {
+async function getIsletmeBilgileri(targetId, rawStoreName = '') {
   if (!targetId || targetId === 'undefined' || targetId === 'null') {
     throw new Error('Tedarikçi / Restoran ID eksik.');
   }
 
   let isletmeEmail = '';
-  let isletmeAdi = '';
+  let isletmeAdi = rawStoreName || '';
   let restoranEnlem = 41.6771;
   let restoranBoylam = 26.5557;
 
@@ -44,46 +44,55 @@ async function getIsletmeBilgileri(targetId) {
     }
   };
 
-  const response = await fetch(`${FIRESTORE_BASE_URL}:runQuery`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(queryBody)
-  });
+  try {
+    const response = await fetch(`${FIRESTORE_BASE_URL}:runQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(queryBody)
+    });
 
-  if (response.ok) {
-    const results = await response.json();
-    if (results && results[0] && results[0].document && results[0].document.fields) {
-      const fields = results[0].document.fields;
+    if (response.ok) {
+      const results = await response.json();
+      if (results && results[0] && results[0].document && results[0].document.fields) {
+        const fields = results[0].document.fields;
 
-      if (fields.isletmeEmail && fields.isletmeEmail.stringValue) {
-        isletmeEmail = fields.isletmeEmail.stringValue.toLowerCase().trim();
-      }
-      if (fields.isletmeAdi && fields.isletmeAdi.stringValue) {
-        isletmeAdi = fields.isletmeAdi.stringValue;
-      } else if (fields.unvan && fields.unvan.stringValue) {
-        isletmeAdi = fields.unvan.stringValue;
-      }
-      if (fields.enlem) {
-        restoranEnlem = Number(fields.enlem.doubleValue || fields.enlem.integerValue || 41.6771);
-      }
-      if (fields.boylam) {
-        restoranBoylam = Number(fields.boylam.doubleValue || fields.boylam.integerValue || 26.5557);
+        if (fields.isletmeEmail && fields.isletmeEmail.stringValue) {
+          isletmeEmail = fields.isletmeEmail.stringValue.toLowerCase().trim();
+        }
+        if (fields.isletmeAdi && fields.isletmeAdi.stringValue) {
+          isletmeAdi = fields.isletmeAdi.stringValue;
+        } else if (fields.unvan && fields.unvan.stringValue) {
+          isletmeAdi = fields.unvan.stringValue;
+        }
+        if (fields.enlem) {
+          restoranEnlem = Number(fields.enlem.doubleValue || fields.enlem.integerValue || 41.6771);
+        }
+        if (fields.boylam) {
+          restoranBoylam = Number(fields.boylam.doubleValue || fields.boylam.integerValue || 26.5557);
+        }
       }
     }
+  } catch (err) {
+    console.error('İşletme bilgisi Firestore okuma uyarısı:', err.message);
   }
 
+  // Eğer Firestore'da henüz email yoksa varsayılan dinamik sistem e-postası atar
   if (!isletmeEmail) {
-    throw new Error(`ID: ${targetId} için eşleşen aktif işletme bulunamadı.`);
+    isletmeEmail = `isletme_${targetId}@aero.com`;
   }
 
-  return { isletmeEmail, isletmeAdi: isletmeAdi || 'KOMAGENE', restoranEnlem, restoranBoylam };
+  return { 
+    isletmeEmail, 
+    isletmeAdi: (isletmeAdi || rawStoreName || 'RESTORAN').toUpperCase(), 
+    restoranEnlem, 
+    restoranBoylam 
+  };
 }
 
 // ----------------------------------------------------
 // PLATFORMLARA CANLI GERİ BİLDİRİM GÖNDERME SERVİSLERİ
 // ----------------------------------------------------
 
-// İşletmenin API Anahtarlarını Firestore'dan Çekme Yardımcısı
 async function getIsletmeEntegrasyonByEmail(email) {
   if (!email) return null;
   try {
@@ -107,7 +116,7 @@ async function getIsletmeEntegrasyonByEmail(email) {
   return null;
 }
 
-// Trendyol GO Canlı Status Güncelleme (Akıllı Haritalamalı)
+// Trendyol GO Canlı Status Güncelleme
 async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
   try {
     let tyStatus = 'Picking';
@@ -122,8 +131,6 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
     }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
-    
-    // Trendyol Supplier Order Status API Endpoint
     const url = `https://api.trendyol.com/sapigw/suppliers/${supplierId}/orders/${orderId}/status`;
     
     await fetch(url, {
@@ -141,7 +148,7 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
   }
 }
 
-// Yemeksepeti Canlı Status Güncelleme (Akıllı Haritalamalı)
+// Yemeksepeti Canlı Status Güncelleme
 async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKeys) {
   try {
     let ysStatus = 'in_preparation';
@@ -155,7 +162,6 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
       ysStatus = 'in_preparation';
     }
 
-    // Delivery Hero / Yemeksepeti Connect Status Endpoint
     const url = `https://connect.deliveryhero.com/api/v1/vendors/${restaurantId}/orders/${orderCode}/status`;
     
     await fetch(url, {
@@ -172,54 +178,61 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
   }
 }
 
-function parseOdemeTipi(paymentType, isPaid) {
-  if (!paymentType) return isPaid ? 'Online Ödeme' : 'Nakit';
-  const pStr = String(paymentType).toLowerCase();
+// Gelişmiş Ödeme Tipi Ayrıştırıcı
+function parseOdemeTipi(paymentType, paymentMethod, isPaid) {
+  const pStr = String(paymentType || paymentMethod || '').toLowerCase();
   if (pStr.includes('cash') || pStr.includes('nakit')) return 'Nakit';
   if (pStr.includes('credit') || pStr.includes('pos') || pStr.includes('kredi') || pStr.includes('card')) return 'Kapıda Kredi Kartı';
   if (pStr.includes('online') || pStr.includes('prepaid') || pStr.includes('wallet') || pStr.includes('pay') || pStr.includes('yemekkarti')) return 'Online Ödeme';
-  return String(paymentType);
+  return isPaid !== false ? 'Online Ödeme' : 'Nakit';
 }
 
-// 2. TRENDYOL CANLI WEBHOOK
+// 2. TRENDYOL CANLI WEBHOOK (EKSİKSİZ VE DİNAMİK)
 app.post('/webhook/trendyol', async (req, res) => {
+  console.log('=== [TRENDYOL CANLI WEBHOOK PAKETİ GELDI] ===');
+  console.log(JSON.stringify(req.body, null, 2));
+
   try {
     const data = req.body;
-    const targetSupplierId = String(data.supplierId || data.merchantId || data.restaurantId || '');
+    const targetSupplierId = String(data.supplierId || data.merchantId || data.restaurantId || data.storeId || '');
 
     if (!targetSupplierId) {
-      return res.status(400).json({ error: 'supplierId eksik.' });
+      return res.status(200).json({ status: 'OK', message: 'supplierId bulunamadı ancak istek kabul edildi.' });
     }
 
-    const isletmeInfo = await getIsletmeBilgileri(targetSupplierId);
+    // Dinamik Restoran Adı
+    const rawStoreName = data.storeName || data.sellerName || data.supplierName || '';
+    const isletmeInfo = await getIsletmeBilgileri(targetSupplierId, rawStoreName);
     const nowIso = new Date().toISOString();
     
-    // 🚀 AKILLI TUTAR AYRIŞTIRMA (payment.totalPrice dâhil tüm yapılar kontrol edilir)
+    // Tutar Ayrıştırma
     const paymentObj = data.payment || {};
     const tutarVal = Number(
       paymentObj.totalPrice || 
       paymentObj.price || 
       data.totalPrice || 
       data.grossAmount || 
+      data.totalAmount ||
       data.settlementAmount || 
-      data.toplamTutar || 
-      data.tutar || 
       0
     );
 
+    // Müşteri Bilgileri
     const customerObj = data.customer || {};
     const mAd = String(
       customerObj.firstName 
         ? `${customerObj.firstName} ${customerObj.lastName || ''}`.trim() 
         : (data.musteriAdi || data.customerName || 'Trendyol Müşterisi')
     );
-    const mTel = String(customerObj.phone || data.telefon || data.phone || data.customerPhone || '08502220000');
+    const mTel = String(customerObj.phone || data.deliveryAddress?.phone || data.telefon || data.phone || '08502220000');
     
-    // PIN Kodu - pinCode, pin, pinKodu tam yakalama
-    const mPin = String(customerObj.pinCode || customerObj.pin || customerObj.extension || data.pinKodu || data.pin || '');
+    // PIN Kodu
+    const mPin = String(customerObj.pinCode || customerObj.pin || customerObj.extension || data.deliveryAddress?.extension || data.pinKodu || '');
 
-    const addrObj = data.shipmentAddress || data.deliveryAddress || data.address || {};
+    // Adres Ayrıştırma
+    const addrObj = data.deliveryAddress || data.shipmentAddress || data.address || {};
     let mAdres = String(
+      addrObj.addressText ||
       addrObj.fullAddress || 
       addrObj.addressLine1 || 
       `${addrObj.address1 || ''} ${addrObj.address2 || ''}`.trim() || 
@@ -232,18 +245,18 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     const mNot = String(data.note || data.customerNote || addrObj.note || addrObj.notes || data.siparisNotu || '');
 
-    let latVal = Number(addrObj.latitude || data.latitude || data.lat || 0);
-    let lngVal = Number(addrObj.longitude || data.longitude || data.lng || 0);
+    // Enlem - Boylam Yakalama
+    let latVal = Number(addrObj.latitude || addrObj.lat || data.latitude || data.lat || 0);
+    let lngVal = Number(addrObj.longitude || addrObj.lng || data.longitude || data.lng || 0);
     if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
     if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
-    const rawPayment = paymentObj.paymentType || data.paymentType || data.paymentMethod || data.paymentMode || 'Online';
-    const odemeYontemi = parseOdemeTipi(rawPayment, true);
+    // Ödeme Tipi
+    const odemeYontemi = parseOdemeTipi(paymentObj.paymentType, data.paymentMethod, true);
 
+    // Ürün Ayrıştırma
     let urunMetni = '';
     const sepetArray = [];
-    
-    // Trendyol paketlerinin asıl ürün dizisi: packageItems veya items
     const rawLines = data.packageItems || data.lines || data.items || data.products || [];
 
     if (Array.isArray(rawLines) && rawLines.length > 0) {
@@ -288,8 +301,8 @@ app.post('/webhook/trendyol', async (req, res) => {
         sistemFiltresi: { stringValue: 'AERO_WEB_OZEL' },
         
         isletmeEmail: { stringValue: isletmeInfo.isletmeEmail },
-        isletmeAdi: { stringValue: isletmeInfo.isletmeAdi.toUpperCase() },
-        marketAdi: { stringValue: isletmeInfo.isletmeAdi.toUpperCase() },
+        isletmeAdi: { stringValue: isletmeInfo.isletmeAdi },
+        marketAdi: { stringValue: isletmeInfo.isletmeAdi },
         supplierId: { stringValue: targetSupplierId },
         
         kaynak: { stringValue: 'Trendyol' },
@@ -348,30 +361,36 @@ app.post('/webhook/trendyol', async (req, res) => {
       body: JSON.stringify(firestoreDocument)
     });
 
+    console.log(`✅ Trendyol Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL)`);
     return res.status(200).json({ status: 'OK' });
   } catch (error) {
     console.error('Trendyol Webhook Hatası:', error.message);
-    return res.status(500).json({ error: error.message });
+    return res.status(200).json({ status: 'OK', error: error.message });
   }
 });
 
-// 3. YEMEKSEPETİ CANLI WEBHOOK
+// 3. YEMEKSEPETİ CANLI WEBHOOK (EKSİKSİZ VE DİNAMİK)
 app.post('/webhook/yemeksepeti', async (req, res) => {
+  console.log('=== [YEMEKSEPETİ CANLI WEBHOOK PAKETİ GELDI] ===');
+  console.log(JSON.stringify(req.body, null, 2));
+
   try {
     const data = req.body;
-    const orderObj = data.order || {}; // Yemeksepeti order katmanı
+    const orderObj = data.order || data;
     
-    const targetRestaurantId = String(data.vendor_id || data.restaurantId || data.vendorId || data.supplierId || '');
+    const targetRestaurantId = String(data.vendor_id || data.restaurantId || data.vendorId || data.supplierId || orderObj.vendor_id || '');
 
     if (!targetRestaurantId) {
-      return res.status(400).json({ error: 'restaurantId / vendor_id eksik.' });
+      return res.status(200).json({ status: 'OK', message: 'vendor_id bulunamadı.' });
     }
 
-    const isletmeInfo = await getIsletmeBilgileri(targetRestaurantId);
+    const rawStoreName = data.vendorName || data.restaurantName || orderObj.vendor_name || '';
+    const isletmeInfo = await getIsletmeBilgileri(targetRestaurantId, rawStoreName);
     const nowIso = new Date().toISOString();
     
     const tutarVal = Number(
       orderObj.price?.grand_total || 
+      orderObj.price?.total ||
       data.price?.total || 
       data.totalAmount || 
       data.totalPrice || 
@@ -385,9 +404,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         : (customerObj.name || customerObj.firstName || data.customerName || 'Yemeksepeti Müşterisi')
     );
     const mTel = String(customerObj.phone || data.delivery?.phone || data.telefon || '08508880000');
-    
-    // Yemeksepeti extension_code / pinKodu
-    const mPin = String(customerObj.extension_code || customerObj.pinCode || customerObj.pin || customerObj.extension || data.pinKodu || '');
+    const mPin = String(customerObj.extension_code || customerObj.pinCode || customerObj.pin || '');
 
     const delivObj = orderObj.delivery || data.delivery || data.address || {};
     const delivAddr = delivObj.address || delivObj;
@@ -397,7 +414,6 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       delivAddr.fullAddress || 
       delivAddr.address || 
       `${delivAddr.street || ''} No:${delivAddr.building_number || ''} D:${delivAddr.flat_number || ''}`.trim() || 
-      data.adres || 
       'Adres Belirtilmedi'
     );
     if (delivAddr.district || delivAddr.city) {
@@ -411,13 +427,11 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
     if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
-    const rawPayment = orderObj.payment?.type || data.paymentMethod || data.paymentType || 'Online';
-    const odemeYontemi = parseOdemeTipi(rawPayment, data.isPaid !== false);
+    const rawPayment = orderObj.payment?.type || data.paymentMethod || data.paymentType;
+    const odemeYontemi = parseOdemeTipi(rawPayment, null, data.isPaid !== false);
 
     let urunMetni = '';
     const sepetArray = [];
-    
-    // Yemeksepeti order.products veya items
     const rawItems = orderObj.products || data.items || data.products || [];
 
     if (Array.isArray(rawItems) && rawItems.length > 0) {
@@ -463,8 +477,8 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         sistemFiltresi: { stringValue: 'AERO_WEB_OZEL' },
 
         isletmeEmail: { stringValue: isletmeInfo.isletmeEmail },
-        isletmeAdi: { stringValue: isletmeInfo.isletmeAdi.toUpperCase() },
-        marketAdi: { stringValue: isletmeInfo.isletmeAdi.toUpperCase() },
+        isletmeAdi: { stringValue: isletmeInfo.isletmeAdi },
+        marketAdi: { stringValue: isletmeInfo.isletmeAdi },
         restaurantId: { stringValue: targetRestaurantId },
 
         kaynak: { stringValue: 'Yemeksepeti' },
@@ -523,10 +537,11 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       body: JSON.stringify(firestoreDocument)
     });
 
+    console.log(`✅ Yemeksepeti Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL)`);
     return res.status(200).json({ status: 'OK' });
   } catch (error) {
     console.error('Yemeksepeti Webhook Hatası:', error.message);
-    return res.status(500).json({ error: error.message });
+    return res.status(200).json({ status: 'OK', error: error.message });
   }
 });
 
@@ -538,7 +553,6 @@ app.post('/update-order-status', async (req, res) => {
       return res.status(400).json({ error: 'siparisId ve durum parametreleri zorunludur.' });
     }
 
-    // A. Firestore üzerindeki sipariş durumunu güncelle
     const updateBody = {
       fields: {
         durum: { stringValue: durum },
@@ -552,7 +566,6 @@ app.post('/update-order-status', async (req, res) => {
       body: JSON.stringify(updateBody)
     });
 
-    // B. Platformlara (Trendyol / Yemeksepeti) Arka Planda Canlı Geri Bildirim Atma
     if (isletmeEmail && kanal) {
       getIsletmeEntegrasyonByEmail(isletmeEmail).then(apiKeys => {
         if (!apiKeys) return;
@@ -575,5 +588,5 @@ app.post('/update-order-status', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`AERO Backend ${PORT} portunda canlı modda çalışıyor.`);
+  console.log(`AERO Backend ${PORT} portunda canlı ve tam dinamik modda çalışıyor.`);
 });
