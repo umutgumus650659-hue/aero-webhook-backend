@@ -88,6 +88,49 @@ async function getIsletmeBilgileri(targetId, rawStoreName = '') {
   };
 }
 
+// MÜKERRER SİPARİŞ KONTROLÜ VE FİRESTORE KAYIT
+async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
+  try {
+    const checkQuery = {
+      structuredQuery: {
+        from: [{ collectionId: 'siparisler' }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: 'siparisNo' },
+            op: 'EQUAL',
+            value: { stringValue: String(siparisNo) }
+          }
+        },
+        limit: 1
+      }
+    };
+
+    const checkRes = await fetch(`${FIRESTORE_BASE_URL}:runQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(checkQuery)
+    });
+
+    if (checkRes.ok) {
+      const checkData = await checkRes.json();
+      if (checkData && checkData[0] && checkData[0].document) {
+        console.log(`⚠️ Sipariş (${siparisNo}) zaten mevcut, mükerrer kayıt engellendi.`);
+        return false;
+      }
+    }
+
+    await fetch(`${FIRESTORE_BASE_URL}/siparisler`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(firestoreDocument)
+    });
+    return true;
+  } catch (e) {
+    console.error('Firestore Kayıt / Mükerrer Kontrol Hatası:', e.message);
+    return false;
+  }
+}
+
 // ----------------------------------------------------
 // PLATFORMLARA CANLI GERİ BİLDİRİM GÖNDERME SERVİSLERİ
 // ----------------------------------------------------
@@ -115,13 +158,15 @@ async function getIsletmeEntegrasyonByEmail(email) {
   return null;
 }
 
-// Trendyol GO Canlı Status Güncelleme (TGO API Standartlarına Uyarlandı)
+// Trendyol GO Canlı Status Güncelleme
 async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
   try {
     let tyStatus = 'Picking';
     const dLower = String(durum).toLowerCase().trim();
 
-    if (dLower.includes('teslim')) {
+    if (dLower.includes('kabul') || dLower.includes('onay')) {
+      tyStatus = 'Picking';
+    } else if (dLower.includes('teslim')) {
       tyStatus = 'Delivered';
     } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) {
       tyStatus = 'InDelivery';
@@ -130,8 +175,6 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
     }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
-    
-    // Trendyol GO Meal Status Endpoint
     const url = `https://api.tgoapis.com/integrator/order/meal/status`;
     
     await fetch(url, {
@@ -160,11 +203,13 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
     let ysStatus = 'in_preparation';
     const dLower = String(durum).toLowerCase().trim();
 
-    if (dLower.includes('teslim')) {
+    if (dLower.includes('kabul') || dLower.includes('onay')) {
+      ysStatus = 'accepted';
+    } else if (dLower.includes('teslim')) {
       ysStatus = 'delivered';
     } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) {
       ysStatus = 'in_delivery';
-    } else if (dLower.includes('hazır') || dLower.includes('hazirlan') || dLower.includes('havuz') || dLower.includes('bekliyor')) {
+    } else if (dLower.includes('hazır') || dLower.includes('hazirlan')) {
       ysStatus = 'in_preparation';
     }
 
@@ -184,16 +229,24 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
   }
 }
 
-// Gelişmiş Ödeme Tipi Ayrıştırıcı
+// DOĞRU VE HASSAS ÖDEME TİPİ AYRIŞTIRICI
 function parseOdemeTipi(paymentType, paymentMethod, isPaid) {
-  const pStr = String(paymentType || paymentMethod || '').toLowerCase();
-  if (pStr.includes('cash') || pStr.includes('nakit')) return 'Nakit';
-  if (pStr.includes('credit') || pStr.includes('pos') || pStr.includes('kredi') || pStr.includes('card')) return 'Kapıda Kredi Kartı';
-  if (pStr.includes('online') || pStr.includes('prepaid') || pStr.includes('wallet') || pStr.includes('pay') || pStr.includes('yemekkarti')) return 'Online Ödeme';
-  return isPaid !== false ? 'Online Ödeme' : 'Nakit';
+  const pStr = String(paymentType || paymentMethod || '').toLowerCase().trim();
+  
+  if (pStr.includes('cash') || pStr.includes('nakit') || pStr.includes('door') || pStr.includes('kapida')) {
+    return 'Kapıda Nakit';
+  }
+  if (pStr.includes('credit') || pStr.includes('pos') || pStr.includes('kredi') || pStr.includes('card')) {
+    return 'Kapıda Kredi Kartı';
+  }
+  if (pStr.includes('online') || pStr.includes('prepaid') || pStr.includes('wallet') || pStr.includes('pay') || pStr.includes('yemekkarti')) {
+    return 'Online Ödeme';
+  }
+  
+  return isPaid === false ? 'Kapıda Nakit' : 'Online Ödeme';
 }
 
-// 2. TRENDYOL CANLI WEBHOOK (REVİZE EDİLMİŞ %100 DİNAMİK)
+// 2. TRENDYOL CANLI WEBHOOK
 app.post('/webhook/trendyol', async (req, res) => {
   console.log('=== [TRENDYOL CANLI WEBHOOK PAKETİ GELDI] ===');
   console.log(JSON.stringify(req.body, null, 2));
@@ -210,7 +263,6 @@ app.post('/webhook/trendyol', async (req, res) => {
     const isletmeInfo = await getIsletmeBilgileri(targetSupplierId, rawStoreName);
     const nowIso = new Date().toISOString();
     
-    // Tutar Ayrıştırma
     const paymentObj = data.payment || {};
     const tutarVal = Number(
       paymentObj.totalPrice || 
@@ -222,7 +274,6 @@ app.post('/webhook/trendyol', async (req, res) => {
       0
     );
 
-    // Müşteri ve Telefon Ayrıştırma (TGO Standartlarına Tam Uyumlu)
     const customerObj = data.customer || {};
     const addrObj = data.deliveryAddress || data.shipmentAddress || data.address || {};
     
@@ -240,7 +291,6 @@ app.post('/webhook/trendyol', async (req, res) => {
       '08502220000'
     );
     
-    // PIN Kodu (Dahili No / Santral Eklentisi)
     const mPin = String(
       addrObj.extension || 
       addrObj.pinCode || 
@@ -251,7 +301,6 @@ app.post('/webhook/trendyol', async (req, res) => {
       ''
     );
 
-    // Adres Ayrıştırma
     let mAdres = String(
       addrObj.addressText ||
       addrObj.fullAddress || 
@@ -266,7 +315,6 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     const mNot = String(data.note || data.customerNote || addrObj.note || addrObj.notes || data.siparisNotu || '');
 
-    // Derinlemesine Enlem - Boylam Yakalama
     let latVal = Number(
       addrObj.latitude || 
       addrObj.lat || 
@@ -291,7 +339,6 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     const odemeYontemi = parseOdemeTipi(paymentObj.paymentType, data.paymentMethod, true);
 
-    // Ürün Ayrıştırma
     let urunMetni = '';
     const sepetArray = [];
     const rawLines = data.packageItems || data.lines || data.items || data.products || [];
@@ -332,9 +379,11 @@ app.post('/webhook/trendyol', async (req, res) => {
       });
     }
 
+    const siparisNoStr = String(data.orderId || data.orderNumber || data.siparisNo || data.id || 'TR-' + Date.now());
+
     const firestoreDocument = {
       fields: {
-        siparisNo: { stringValue: String(data.orderId || data.orderNumber || data.siparisNo || data.id || 'TR-' + Date.now()) },
+        siparisNo: { stringValue: siparisNoStr },
         sistemFiltresi: { stringValue: 'AERO_WEB_OZEL' },
         
         isletmeEmail: { stringValue: isletmeInfo.isletmeEmail },
@@ -392,13 +441,11 @@ app.post('/webhook/trendyol', async (req, res) => {
       }
     };
 
-    await fetch(`${FIRESTORE_BASE_URL}/siparisler`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(firestoreDocument)
-    });
+    const isSaved = await checkDuplicateAndSave(siparisNoStr, firestoreDocument);
+    if (isSaved) {
+      console.log(`✅ Trendyol Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL)`);
+    }
 
-    console.log(`✅ Trendyol Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL)`);
     return res.status(200).json({ status: 'OK' });
   } catch (error) {
     console.error('Trendyol Webhook Hatası:', error.message);
@@ -406,7 +453,7 @@ app.post('/webhook/trendyol', async (req, res) => {
   }
 });
 
-// 3. YEMEKSEPETİ CANLI WEBHOOK (REVİZE EDİLMİŞ %100 DİNAMİK)
+// 3. YEMEKSEPETİ CANLI WEBHOOK
 app.post('/webhook/yemeksepeti', async (req, res) => {
   console.log('=== [YEMEKSEPETİ CANLI WEBHOOK PAKETİ GELDI] ===');
   console.log(JSON.stringify(req.body, null, 2));
@@ -520,9 +567,11 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       });
     }
 
+    const siparisNoStr = String(orderObj.code || orderObj.order_code || orderObj.id || data.orderCode || data.siparisNo || 'YS-' + Date.now());
+
     const firestoreDocument = {
       fields: {
-        siparisNo: { stringValue: String(orderObj.code || orderObj.order_code || orderObj.id || data.orderCode || data.siparisNo || 'YS-' + Date.now()) },
+        siparisNo: { stringValue: siparisNoStr },
         sistemFiltresi: { stringValue: 'AERO_WEB_OZEL' },
 
         isletmeEmail: { stringValue: isletmeInfo.isletmeEmail },
@@ -580,13 +629,11 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       }
     };
 
-    await fetch(`${FIRESTORE_BASE_URL}/siparisler`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(firestoreDocument)
-    });
+    const isSaved = await checkDuplicateAndSave(siparisNoStr, firestoreDocument);
+    if (isSaved) {
+      console.log(`✅ Yemeksepeti Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL)`);
+    }
 
-    console.log(`✅ Yemeksepeti Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL)`);
     return res.status(200).json({ status: 'OK' });
   } catch (error) {
     console.error('Yemeksepeti Webhook Hatası:', error.message);
