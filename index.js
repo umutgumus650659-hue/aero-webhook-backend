@@ -76,7 +76,6 @@ async function getIsletmeBilgileri(targetId, rawStoreName = '') {
     console.error('İşletme bilgisi Firestore okuma uyarısı:', err.message);
   }
 
-  // Eğer Firestore'da henüz email yoksa varsayılan dinamik sistem e-postası atar
   if (!isletmeEmail) {
     isletmeEmail = `isletme_${targetId}@aero.com`;
   }
@@ -116,7 +115,7 @@ async function getIsletmeEntegrasyonByEmail(email) {
   return null;
 }
 
-// Trendyol GO Canlı Status Güncelleme
+// Trendyol GO Canlı Status Güncelleme (TGO API Standartlarına Uyarlandı)
 async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
   try {
     let tyStatus = 'Picking';
@@ -131,16 +130,23 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
     }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
-    const url = `https://api.trendyol.com/sapigw/suppliers/${supplierId}/orders/${orderId}/status`;
+    
+    // Trendyol GO Meal Status Endpoint
+    const url = `https://api.tgoapis.com/integrator/order/meal/status`;
     
     await fetch(url, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': authHeader,
-        'User-Agent': `${supplierId} - SelfIntegration`
+        'x-agentname': 'AEROKuryeSistemi',
+        'x-executor-user': 'coskunsezer82@gmail.com'
       },
-      body: JSON.stringify({ status: tyStatus })
+      body: JSON.stringify({
+        supplierId: Number(supplierId),
+        orderId: String(orderId),
+        status: tyStatus
+      })
     });
     console.log(`Trendyol Sipariş (${orderId}) [Web Durumu: "${durum}"] -> Trendyol API: ${tyStatus} 🟢`);
   } catch (e) {
@@ -187,7 +193,7 @@ function parseOdemeTipi(paymentType, paymentMethod, isPaid) {
   return isPaid !== false ? 'Online Ödeme' : 'Nakit';
 }
 
-// 2. TRENDYOL CANLI WEBHOOK (EKSİKSİZ VE DİNAMİK)
+// 2. TRENDYOL CANLI WEBHOOK (REVİZE EDİLMİŞ %100 DİNAMİK)
 app.post('/webhook/trendyol', async (req, res) => {
   console.log('=== [TRENDYOL CANLI WEBHOOK PAKETİ GELDI] ===');
   console.log(JSON.stringify(req.body, null, 2));
@@ -200,7 +206,6 @@ app.post('/webhook/trendyol', async (req, res) => {
       return res.status(200).json({ status: 'OK', message: 'supplierId bulunamadı ancak istek kabul edildi.' });
     }
 
-    // Dinamik Restoran Adı
     const rawStoreName = data.storeName || data.sellerName || data.supplierName || '';
     const isletmeInfo = await getIsletmeBilgileri(targetSupplierId, rawStoreName);
     const nowIso = new Date().toISOString();
@@ -217,20 +222,36 @@ app.post('/webhook/trendyol', async (req, res) => {
       0
     );
 
-    // Müşteri Bilgileri
+    // Müşteri ve Telefon Ayrıştırma (TGO Standartlarına Tam Uyumlu)
     const customerObj = data.customer || {};
+    const addrObj = data.deliveryAddress || data.shipmentAddress || data.address || {};
+    
     const mAd = String(
       customerObj.firstName 
         ? `${customerObj.firstName} ${customerObj.lastName || ''}`.trim() 
         : (data.musteriAdi || data.customerName || 'Trendyol Müşterisi')
     );
-    const mTel = String(customerObj.phone || data.deliveryAddress?.phone || data.telefon || data.phone || '08502220000');
     
-    // PIN Kodu
-    const mPin = String(customerObj.pinCode || customerObj.pin || customerObj.extension || data.deliveryAddress?.extension || data.pinKodu || '');
+    const mTel = String(
+      addrObj.phone || 
+      customerObj.phone || 
+      data.telefon || 
+      data.phone || 
+      '08502220000'
+    );
+    
+    // PIN Kodu (Dahili No / Santral Eklentisi)
+    const mPin = String(
+      addrObj.extension || 
+      addrObj.pinCode || 
+      customerObj.extension || 
+      customerObj.pinCode || 
+      customerObj.pin || 
+      data.pinKodu || 
+      ''
+    );
 
     // Adres Ayrıştırma
-    const addrObj = data.deliveryAddress || data.shipmentAddress || data.address || {};
     let mAdres = String(
       addrObj.addressText ||
       addrObj.fullAddress || 
@@ -245,13 +266,29 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     const mNot = String(data.note || data.customerNote || addrObj.note || addrObj.notes || data.siparisNotu || '');
 
-    // Enlem - Boylam Yakalama
-    let latVal = Number(addrObj.latitude || addrObj.lat || data.latitude || data.lat || 0);
-    let lngVal = Number(addrObj.longitude || addrObj.lng || data.longitude || data.lng || 0);
+    // Derinlemesine Enlem - Boylam Yakalama
+    let latVal = Number(
+      addrObj.latitude || 
+      addrObj.lat || 
+      addrObj.location?.latitude || 
+      addrObj.location?.lat || 
+      data.latitude || 
+      data.lat || 
+      0
+    );
+    let lngVal = Number(
+      addrObj.longitude || 
+      addrObj.lng || 
+      addrObj.location?.longitude || 
+      addrObj.location?.lng || 
+      data.longitude || 
+      data.lng || 
+      0
+    );
+    
     if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
     if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
-    // Ödeme Tipi
     const odemeYontemi = parseOdemeTipi(paymentObj.paymentType, data.paymentMethod, true);
 
     // Ürün Ayrıştırma
@@ -369,7 +406,7 @@ app.post('/webhook/trendyol', async (req, res) => {
   }
 });
 
-// 3. YEMEKSEPETİ CANLI WEBHOOK (EKSİKSİZ VE DİNAMİK)
+// 3. YEMEKSEPETİ CANLI WEBHOOK (REVİZE EDİLMİŞ %100 DİNAMİK)
 app.post('/webhook/yemeksepeti', async (req, res) => {
   console.log('=== [YEMEKSEPETİ CANLI WEBHOOK PAKETİ GELDI] ===');
   console.log(JSON.stringify(req.body, null, 2));
@@ -398,17 +435,17 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     );
 
     const customerObj = orderObj.customer || data.customer || {};
+    const delivObj = orderObj.delivery || data.delivery || data.address || {};
+    const delivAddr = delivObj.address || delivObj;
+
     const mAd = String(
       customerObj.first_name 
         ? `${customerObj.first_name} ${customerObj.last_name || ''}`.trim()
         : (customerObj.name || customerObj.firstName || data.customerName || 'Yemeksepeti Müşterisi')
     );
-    const mTel = String(customerObj.phone || data.delivery?.phone || data.telefon || '08508880000');
+    const mTel = String(customerObj.phone || delivObj.phone || data.telefon || '08508880000');
     const mPin = String(customerObj.extension_code || customerObj.pinCode || customerObj.pin || '');
 
-    const delivObj = orderObj.delivery || data.delivery || data.address || {};
-    const delivAddr = delivObj.address || delivObj;
-    
     let mAdres = String(
       delivAddr.full_address || 
       delivAddr.fullAddress || 
@@ -422,8 +459,20 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 
     const mNot = String(delivObj.instructions || data.notes || data.customerNote || delivAddr.note || '');
 
-    let latVal = Number(delivAddr.latitude || delivAddr.lat || delivObj.location?.lat || 0);
-    let lngVal = Number(delivAddr.longitude || delivAddr.lng || delivObj.location?.lng || 0);
+    let latVal = Number(
+      delivAddr.latitude || 
+      delivAddr.lat || 
+      delivObj.location?.latitude || 
+      delivObj.location?.lat || 
+      0
+    );
+    let lngVal = Number(
+      delivAddr.longitude || 
+      delivAddr.lng || 
+      delivObj.location?.longitude || 
+      delivObj.location?.lng || 
+      0
+    );
     if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
     if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
@@ -473,7 +522,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 
     const firestoreDocument = {
       fields: {
-        siparisNo: { stringValue: String(orderObj.code || orderObj.id || data.orderCode || data.siparisNo || 'YS-' + Date.now()) },
+        siparisNo: { stringValue: String(orderObj.code || orderObj.order_code || orderObj.id || data.orderCode || data.siparisNo || 'YS-' + Date.now()) },
         sistemFiltresi: { stringValue: 'AERO_WEB_OZEL' },
 
         isletmeEmail: { stringValue: isletmeInfo.isletmeEmail },
