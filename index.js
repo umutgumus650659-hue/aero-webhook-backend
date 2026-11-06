@@ -18,9 +18,15 @@ app.post('/validate-api', (req, res) => {
 });
 
 // 1. DİNAMİK İŞLETME BİLGİSİ ÇEKME
-async function getIsletmeBilgileri(targetId, rawStoreName = '') {
-  if (!targetId || targetId === 'undefined' || targetId === 'null') {
-    throw new Error('Tedarikçi / Restoran ID eksik.');
+async function getIsletmeBilgileri(targetId, storeId = '', rawStoreName = '') {
+  const searchId = String(targetId || storeId || '').trim();
+  if (!searchId || searchId === 'undefined' || searchId === 'null') {
+    return {
+      isletmeEmail: 'isletme_bilinmeyen@aero.com',
+      isletmeAdi: (rawStoreName || 'RESTORAN').toUpperCase(),
+      restoranEnlem: 41.6771,
+      restoranBoylam: 26.5557
+    };
   }
 
   let isletmeEmail = '';
@@ -35,8 +41,9 @@ async function getIsletmeBilgileri(targetId, rawStoreName = '') {
         compositeFilter: {
           op: 'OR',
           filters: [
-            { fieldFilter: { field: { fieldPath: 'trSupplierId' }, op: 'EQUAL', value: { stringValue: String(targetId) } } },
-            { fieldFilter: { field: { fieldPath: 'ysRestoranId' }, op: 'EQUAL', value: { stringValue: String(targetId) } } }
+            { fieldFilter: { field: { fieldPath: 'trSupplierId' }, op: 'EQUAL', value: { stringValue: String(searchId) } } },
+            { fieldFilter: { field: { fieldPath: 'ysRestoranId' }, op: 'EQUAL', value: { stringValue: String(searchId) } } },
+            { fieldFilter: { field: { fieldPath: 'storeId' }, op: 'EQUAL', value: { stringValue: String(searchId) } } }
           ]
         }
       },
@@ -77,7 +84,7 @@ async function getIsletmeBilgileri(targetId, rawStoreName = '') {
   }
 
   if (!isletmeEmail) {
-    isletmeEmail = `isletme_${targetId}@aero.com`;
+    isletmeEmail = `isletme_${searchId}@aero.com`;
   }
 
   return { 
@@ -88,7 +95,7 @@ async function getIsletmeBilgileri(targetId, rawStoreName = '') {
   };
 }
 
-// MÜKERRER SİPARİŞ KONTROLÜ VE FİRESTORE KAYIT
+// GÜÇLENDİRİLMİŞ MÜKERRER SİPARİŞ KONTROLÜ VE FİRESTORE KAYIT
 async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
   try {
     const checkQuery = {
@@ -114,7 +121,7 @@ async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
     if (checkRes.ok) {
       const checkData = await checkRes.json();
       if (checkData && checkData[0] && checkData[0].document) {
-        console.log(`⚠️ Sipariş (${siparisNo}) zaten mevcut, mükerrer kayıt engellendi.`);
+        console.log(`⚠️ Sipariş (${siparisNo}) zaten mevcut, mükerrer kayıt engellendi 🛑`);
         return false;
       }
     }
@@ -131,10 +138,7 @@ async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
   }
 }
 
-// ----------------------------------------------------
-// PLATFORMLARA CANLI GERİ BİLDİRİM GÖNDERME SERVİSLERİ
-// ----------------------------------------------------
-
+// PLATFORMLARA CANLI GERİ BİLDİRİM SERVİSLERİ
 async function getIsletmeEntegrasyonByEmail(email) {
   if (!email) return null;
   try {
@@ -229,53 +233,73 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
   }
 }
 
-// DOĞRU VE HASSAS ÖDEME TİPİ AYRIŞTIRICI
-function parseOdemeTipi(paymentType, paymentMethod, isPaid) {
-  const pStr = String(paymentType || paymentMethod || '').toLowerCase().trim();
+// GELİŞMİŞ VE CANLI UYUMLU ÖDEME TİPİ AYRIŞTIRICI
+function parseOdemeTipi(paymentObj, dataRoot = {}) {
+  const pObj = paymentObj || {};
+  const onDeliv = pObj.onDelivery || {};
   
-  if (pStr.includes('cash') || pStr.includes('nakit') || pStr.includes('door') || pStr.includes('kapida')) {
+  const mainType = String(pObj.paymentType || dataRoot.paymentType || dataRoot.paymentMethod || '').toLowerCase().trim();
+  const subType = String(onDeliv.paymentType || '').toLowerCase().trim();
+  const mealCard = String(pObj.mealCard || '').toLowerCase().trim();
+
+  // Kapıda Ödeme Detayları
+  if (mainType.includes('on_delivery') || mainType.includes('door') || mainType.includes('kapida')) {
+    if (subType.includes('cash') || subType.includes('nakit')) {
+      return 'Kapıda Nakit';
+    }
+    if (subType.includes('credit') || subType.includes('card') || subType.includes('pos') || subType.includes('kredi')) {
+      return 'Kapıda Kredi Kartı';
+    }
     return 'Kapıda Nakit';
   }
-  if (pStr.includes('credit') || pStr.includes('pos') || pStr.includes('kredi') || pStr.includes('card')) {
-    return 'Kapıda Kredi Kartı';
+
+  // Yemek Kartları (Sodexo, Ticket vb.)
+  if (mealCard && mealCard !== 'null' && mealCard !== 'undefined') {
+    return `Yemek Kartı (${mealCard.toUpperCase()})`;
   }
-  if (pStr.includes('online') || pStr.includes('prepaid') || pStr.includes('wallet') || pStr.includes('pay') || pStr.includes('yemekkarti')) {
-    return 'Online Ödeme';
-  }
-  
-  return isPaid === false ? 'Kapıda Nakit' : 'Online Ödeme';
+
+  // Nakit / Kredi Kartı Açık Metin
+  if (mainType.includes('cash') || mainType.includes('nakit')) return 'Kapıda Nakit';
+  if (mainType.includes('credit') || mainType.includes('pos') || mainType.includes('kredi')) return 'Kapıda Kredi Kartı';
+
+  // Varsayılan Online Ödeme
+  return 'Online Ödeme';
 }
 
-// 2. TRENDYOL CANLI WEBHOOK
+// 2. TRENDYOL CANLI WEBHOOK ROUTE
 app.post('/webhook/trendyol', async (req, res) => {
+  // 1. TRENDYOL'A ANINDA RESPOND VER (6 DEFA TEKRARLAMASINI ENGELLER!)
+  res.status(200).json({ status: 'OK', message: 'Paket alındı.' });
+
   console.log('=== [TRENDYOL CANLI WEBHOOK PAKETİ GELDI] ===');
   console.log(JSON.stringify(req.body, null, 2));
 
   try {
     const data = req.body;
-    const targetSupplierId = String(data.supplierId || data.merchantId || data.restaurantId || data.storeId || '');
+    const targetSupplierId = String(data.supplierId || data.merchantId || data.restaurantId || '');
+    const storeId = String(data.storeId || '');
 
-    if (!targetSupplierId) {
-      return res.status(200).json({ status: 'OK', message: 'supplierId bulunamadı ancak istek kabul edildi.' });
+    if (!targetSupplierId && !storeId) {
+      console.log('⚠️ supplierId / storeId bulunamadı.');
+      return;
     }
 
     const rawStoreName = data.storeName || data.sellerName || data.supplierName || '';
-    const isletmeInfo = await getIsletmeBilgileri(targetSupplierId, rawStoreName);
+    const isletmeInfo = await getIsletmeBilgileri(targetSupplierId, storeId, rawStoreName);
     const nowIso = new Date().toISOString();
     
     const paymentObj = data.payment || {};
     const tutarVal = Number(
+      data.totalPrice || 
       paymentObj.totalPrice || 
       paymentObj.price || 
-      data.totalPrice || 
       data.grossAmount || 
       data.totalAmount ||
-      data.settlementAmount || 
       0
     );
 
     const customerObj = data.customer || {};
-    const addrObj = data.deliveryAddress || data.shipmentAddress || data.address || {};
+    const addrObj = data.address || data.deliveryAddress || data.shipmentAddress || {};
     
     const mAd = String(
       customerObj.firstName 
@@ -284,70 +308,57 @@ app.post('/webhook/trendyol', async (req, res) => {
     );
     
     const mTel = String(
+      data.callCenterPhone || 
       addrObj.phone || 
       customerObj.phone || 
       data.telefon || 
-      data.phone || 
       '08502220000'
     );
     
     const mPin = String(
-      addrObj.extension || 
       addrObj.pinCode || 
-      customerObj.extension || 
+      addrObj.extension || 
       customerObj.pinCode || 
-      customerObj.pin || 
-      data.pinKodu || 
+      customerObj.extension || 
+      data.orderNumber || 
       ''
     );
 
     let mAdres = String(
+      addrObj.address1 || 
       addrObj.addressText ||
       addrObj.fullAddress || 
-      addrObj.addressLine1 || 
       `${addrObj.address1 || ''} ${addrObj.address2 || ''}`.trim() || 
       data.adres || 
       'Adres Belirtilmedi'
     );
+    
+    if (addrObj.addressDescription) {
+      mAdres += ` [Tarif: ${addrObj.addressDescription}]`;
+    }
     if (addrObj.district || addrObj.city) {
-      mAdres += ` (${addrObj.district || ''} / ${addrObj.city || ''})`.trim();
+      mAdres += ` (${addrObj.district || ''} / ${addrObj.city || ''})`;
     }
 
-    const mNot = String(data.note || data.customerNote || addrObj.note || addrObj.notes || data.siparisNotu || '');
+    const mNot = String(data.customerNote || data.note || addrObj.note || addrObj.notes || data.siparisNotu || '');
 
-    let latVal = Number(
-      addrObj.latitude || 
-      addrObj.lat || 
-      addrObj.location?.latitude || 
-      addrObj.location?.lat || 
-      data.latitude || 
-      data.lat || 
-      0
-    );
-    let lngVal = Number(
-      addrObj.longitude || 
-      addrObj.lng || 
-      addrObj.location?.longitude || 
-      addrObj.location?.lng || 
-      data.longitude || 
-      data.lng || 
-      0
-    );
+    let latVal = Number(addrObj.latitude || addrObj.lat || 0);
+    let lngVal = Number(addrObj.longitude || addrObj.lng || 0);
     
     if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
     if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
-    const odemeYontemi = parseOdemeTipi(paymentObj.paymentType, data.paymentMethod, true);
+    const odemeYontemi = parseOdemeTipi(paymentObj, data);
 
     let urunMetni = '';
     const sepetArray = [];
-    const rawLines = data.packageItems || data.lines || data.items || data.products || [];
+    const rawLines = data.lines || data.packageItems || data.items || data.products || [];
 
     if (Array.isArray(rawLines) && rawLines.length > 0) {
       urunMetni = rawLines.map(l => {
         const q = Number(l.quantity || l.count || l.adet || 1);
-        const pName = l.productName || l.name || l.isim || 'Ürün';
-        const priceVal = Number(l.price || l.unitPrice || l.fiyat || (tutarVal > 0 ? tutarVal / rawLines.length : 0));
+        const pName = l.name || l.productName || l.description || 'Ürün';
+        const priceVal = Number(l.price || l.unitSellingPrice || l.unitPrice || (tutarVal > 0 ? tutarVal / rawLines.length : 0));
 
         sepetArray.push({
           mapValue: {
@@ -360,14 +371,13 @@ app.post('/webhook/trendyol', async (req, res) => {
         });
 
         let opts = '';
-        if (Array.isArray(l.options) && l.options.length > 0) {
-          opts = ` (${l.options.map(o => (typeof o === 'object' ? (o.optionName || o.name || o.value || o) : o)).join(', ')})`;
+        if (Array.isArray(l.modifierProducts) && l.modifierProducts.length > 0) {
+          opts = ` (${l.modifierProducts.map(o => o.name || o).join(', ')})`;
         }
-        const n = l.notes || l.note ? ` [Not: ${l.notes || l.note}]` : '';
-        return `• ${q}x ${pName}${opts}${n}`;
+        return `• ${q}x ${pName}${opts}`;
       }).join('\n');
     } else {
-      urunMetni = String(data.detay || '• 1x Sipariş Ürünü');
+      urunMetni = '• 1x Sipariş Ürünü';
       sepetArray.push({
         mapValue: {
           fields: {
@@ -379,7 +389,8 @@ app.post('/webhook/trendyol', async (req, res) => {
       });
     }
 
-    const siparisNoStr = String(data.orderId || data.orderNumber || data.siparisNo || data.id || 'TR-' + Date.now());
+    // Benzersiz Sipariş Numarası Ayıklama
+    const siparisNoStr = String(data.orderNumber || data.orderId || data.id || 'TR-' + Date.now());
 
     const firestoreDocument = {
       fields: {
@@ -390,6 +401,7 @@ app.post('/webhook/trendyol', async (req, res) => {
         isletmeAdi: { stringValue: isletmeInfo.isletmeAdi },
         marketAdi: { stringValue: isletmeInfo.isletmeAdi },
         supplierId: { stringValue: targetSupplierId },
+        storeId: { stringValue: storeId },
         
         kaynak: { stringValue: 'Trendyol' },
         kanal: { stringValue: 'Trendyol' },
@@ -443,18 +455,18 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     const isSaved = await checkDuplicateAndSave(siparisNoStr, firestoreDocument);
     if (isSaved) {
-      console.log(`✅ Trendyol Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL)`);
+      console.log(`✅ Trendyol Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL) [Ödeme: ${odemeYontemi}]`);
     }
 
-    return res.status(200).json({ status: 'OK' });
   } catch (error) {
-    console.error('Trendyol Webhook Hatası:', error.message);
-    return res.status(200).json({ status: 'OK', error: error.message });
+    console.error('Trendyol Webhook İşleme Hatası:', error.message);
   }
 });
 
 // 3. YEMEKSEPETİ CANLI WEBHOOK
 app.post('/webhook/yemeksepeti', async (req, res) => {
+  res.status(200).json({ status: 'OK' });
+
   console.log('=== [YEMEKSEPETİ CANLI WEBHOOK PAKETİ GELDI] ===');
   console.log(JSON.stringify(req.body, null, 2));
 
@@ -462,14 +474,12 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     const data = req.body;
     const orderObj = data.order || data;
     
-    const targetRestaurantId = String(data.vendor_id || data.restaurantId || data.vendorId || data.supplierId || orderObj.vendor_id || '');
+    const targetRestaurantId = String(data.vendor_id || data.restaurantId || data.vendorId || orderObj.vendor_id || '');
 
-    if (!targetRestaurantId) {
-      return res.status(200).json({ status: 'OK', message: 'vendor_id bulunamadı.' });
-    }
+    if (!targetRestaurantId) return;
 
     const rawStoreName = data.vendorName || data.restaurantName || orderObj.vendor_name || '';
-    const isletmeInfo = await getIsletmeBilgileri(targetRestaurantId, rawStoreName);
+    const isletmeInfo = await getIsletmeBilgileri(targetRestaurantId, '', rawStoreName);
     const nowIso = new Date().toISOString();
     
     const tutarVal = Number(
@@ -477,7 +487,6 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       orderObj.price?.total ||
       data.price?.total || 
       data.totalAmount || 
-      data.totalPrice || 
       0
     );
 
@@ -488,43 +497,29 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     const mAd = String(
       customerObj.first_name 
         ? `${customerObj.first_name} ${customerObj.last_name || ''}`.trim()
-        : (customerObj.name || customerObj.firstName || data.customerName || 'Yemeksepeti Müşterisi')
+        : (customerObj.name || customerObj.firstName || 'Yemeksepeti Müşterisi')
     );
-    const mTel = String(customerObj.phone || delivObj.phone || data.telefon || '08508880000');
-    const mPin = String(customerObj.extension_code || customerObj.pinCode || customerObj.pin || '');
+    const mTel = String(customerObj.phone || delivObj.phone || '08508880000');
+    const mPin = String(customerObj.extension_code || customerObj.pinCode || '');
 
     let mAdres = String(
       delivAddr.full_address || 
       delivAddr.fullAddress || 
-      delivAddr.address || 
       `${delivAddr.street || ''} No:${delivAddr.building_number || ''} D:${delivAddr.flat_number || ''}`.trim() || 
       'Adres Belirtilmedi'
     );
     if (delivAddr.district || delivAddr.city) {
-      mAdres += ` (${delivAddr.district || ''} / ${delivAddr.city || ''})`.trim();
+      mAdres += ` (${delivAddr.district || ''} / ${delivAddr.city || ''})`;
     }
 
-    const mNot = String(delivObj.instructions || data.notes || data.customerNote || delivAddr.note || '');
+    const mNot = String(delivObj.instructions || data.notes || customerObj.customerNote || '');
 
-    let latVal = Number(
-      delivAddr.latitude || 
-      delivAddr.lat || 
-      delivObj.location?.latitude || 
-      delivObj.location?.lat || 
-      0
-    );
-    let lngVal = Number(
-      delivAddr.longitude || 
-      delivAddr.lng || 
-      delivObj.location?.longitude || 
-      delivObj.location?.lng || 
-      0
-    );
+    let latVal = Number(delivAddr.latitude || delivAddr.lat || 0);
+    let lngVal = Number(delivAddr.longitude || delivAddr.lng || 0);
     if (latVal === 0) latVal = isletmeInfo.restoranEnlem;
     if (lngVal === 0) lngVal = isletmeInfo.restoranBoylam;
 
-    const rawPayment = orderObj.payment?.type || data.paymentMethod || data.paymentType;
-    const odemeYontemi = parseOdemeTipi(rawPayment, null, data.isPaid !== false);
+    const odemeYontemi = parseOdemeTipi(orderObj.payment || data.payment || {}, data);
 
     let urunMetni = '';
     const sepetArray = [];
@@ -532,9 +527,9 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 
     if (Array.isArray(rawItems) && rawItems.length > 0) {
       urunMetni = rawItems.map(i => {
-        const q = Number(i.quantity || i.count || i.adet || 1);
+        const q = Number(i.quantity || i.count || 1);
         const pName = i.name || i.productName || 'Ürün';
-        const priceVal = Number(i.unit_price || i.price || i.unitPrice || (tutarVal > 0 ? tutarVal / rawItems.length : 0));
+        const priceVal = Number(i.unit_price || i.price || (tutarVal > 0 ? tutarVal / rawItems.length : 0));
 
         sepetArray.push({
           mapValue: {
@@ -546,16 +541,10 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
           }
         });
 
-        let opts = '';
-        const selectedOpts = i.selected_options || i.options || i.selectedToppings;
-        if (Array.isArray(selectedOpts) && selectedOpts.length > 0) {
-          opts = ` (${selectedOpts.map(o => (typeof o === 'object' ? (o.value || o.name || o) : o)).join(', ')})`;
-        }
-        const n = i.notes || i.note ? ` [Not: ${i.notes || i.note}]` : '';
-        return `• ${q}x ${pName}${opts}${n}`;
+        return `• ${q}x ${pName}`;
       }).join('\n');
     } else {
-      urunMetni = String(data.detay || '• 1x Sipariş Ürünü');
+      urunMetni = '• 1x Sipariş Ürünü';
       sepetArray.push({
         mapValue: {
           fields: {
@@ -567,7 +556,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       });
     }
 
-    const siparisNoStr = String(orderObj.code || orderObj.order_code || orderObj.id || data.orderCode || data.siparisNo || 'YS-' + Date.now());
+    const siparisNoStr = String(orderObj.code || orderObj.order_code || orderObj.id || 'YS-' + Date.now());
 
     const firestoreDocument = {
       fields: {
@@ -631,13 +620,11 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 
     const isSaved = await checkDuplicateAndSave(siparisNoStr, firestoreDocument);
     if (isSaved) {
-      console.log(`✅ Yemeksepeti Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL)`);
+      console.log(`✅ Yemeksepeti Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL) [Ödeme: ${odemeYontemi}]`);
     }
 
-    return res.status(200).json({ status: 'OK' });
   } catch (error) {
     console.error('Yemeksepeti Webhook Hatası:', error.message);
-    return res.status(200).json({ status: 'OK', error: error.message });
   }
 });
 
@@ -682,7 +669,7 @@ app.post('/update-order-status', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`AERO Backend ${PORT} portunda canlı ve tam dinamik modda çalışıyor.`);
+  console.log(`AERO Backend ${PORT} portunda canlı ve tam dinamik modda çalışıyor 🚀`);
 });
