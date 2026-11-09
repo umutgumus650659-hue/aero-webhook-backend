@@ -7,19 +7,29 @@ app.use(express.json());
 
 const FIRESTORE_BASE_URL = 'https://firestore.googleapis.com/v1/projects/shopier-1d17c/databases/(default)/documents';
 
-// 🚀 HAFIZA İÇİ MÜKERRER KİLİT MEKANİZMASI (Race Condition %100 Engeller)
+// 🚀 AKILLI HAFIZA İÇİ MÜKERRER KİLİT MEKANİZMASI (Memory Leak Korumalı)
 const processingOrdersLock = new Map();
 
-function isOrderLocked(siparisNo) {
-  if (!siparisNo) return false;
+// Bellek şişmesini önlemek için her 10 dakikada bir eski kilitleri temizle
+setInterval(() => {
   const now = Date.now();
-  if (processingOrdersLock.has(siparisNo)) {
-    const lockTime = processingOrdersLock.get(siparisNo);
-    if (now - lockTime < 30000) { // 30 Saniye boyunca kilitle
+  for (const [key, lockTime] of processingOrdersLock.entries()) {
+    if (now - lockTime > 60000) { // 1 dakikadan eski kilitleri sil
+      processingOrdersLock.delete(key);
+    }
+  }
+}, 10 * 60 * 1000);
+
+function isOrderLocked(lockKey) {
+  if (!lockKey) return false;
+  const now = Date.now();
+  if (processingOrdersLock.has(lockKey)) {
+    const lockTime = processingOrdersLock.get(lockKey);
+    if (now - lockTime < 15000) { // 15 Saniye boyunca tam aynı paketi kilitle
       return true;
     }
   }
-  processingOrdersLock.set(siparisNo, now);
+  processingOrdersLock.set(lockKey, now);
   return false;
 }
 
@@ -243,7 +253,6 @@ function parseOdemeTipi(paymentObj, dataRoot = {}) {
   const subType = String(onDeliv.paymentType || '').toLowerCase().trim();
   const mealCard = String(pObj.mealCard || '').toLowerCase().trim();
 
-  // Kapıda Ödeme Detayları
   if (mainType.includes('on_delivery') || mainType.includes('door') || mainType.includes('kapida')) {
     if (subType.includes('cash') || subType.includes('nakit')) {
       return 'Kapıda Nakit';
@@ -254,39 +263,41 @@ function parseOdemeTipi(paymentObj, dataRoot = {}) {
     return 'Kapıda Nakit';
   }
 
-  // Yemek Kartları (Sodexo, Ticket vb.)
   if (mealCard && mealCard !== 'null' && mealCard !== 'undefined') {
     return `Yemek Kartı (${mealCard.toUpperCase()})`;
   }
 
-  // Nakit / Kredi Kartı Açık Metin
   if (mainType.includes('cash') || mainType.includes('nakit')) return 'Kapıda Nakit';
   if (mainType.includes('credit') || mainType.includes('pos') || mainType.includes('kredi')) return 'Kapıda Kredi Kartı';
 
-  // Varsayılan Online Ödeme
   return 'Online Ödeme';
 }
 
 // 2. TRENDYOL CANLI WEBHOOK ROUTE
 app.post('/webhook/trendyol', async (req, res) => {
-  // 1. TRENDYOL'A ANINDA RESPOND VER (6 DEFA TEKRARLAMASINI ENGELLER!)
+  // 1. TRENDYOL'A ANINDA HTTP 200 RESPOND VER (Mükerrer İstekleri Keser!)
   res.status(200).json({ status: 'OK', message: 'Paket alındı.' });
 
   try {
     const data = req.body;
-    const siparisNoStr = String(data.orderNumber || data.orderId || data.id || '');
+    
+    // Sipariş numarasını kesinleştir (Trendyol'da en kararlı alan orderNumber veya packageNumber'dır)
+    const siparisNoStr = String(data.orderNumber || data.packageNumber || data.orderId || data.id || '').trim();
 
     if (!siparisNoStr) return;
 
-    // Hafıza İçi Mükerrer Kontrolü (Peş peşe gelen 6 isteği anında süzgeçten geçirir)
-    if (isOrderLocked(siparisNoStr)) {
-      console.log(`⚠️ Trendyol Sipariş (${siparisNoStr}) peş peşe geldi, hafıza kilidi engelledi 🛑`);
+    // Paket Statüsü ile Birlikte Kilit Anahtarı Oluştur
+    const statusStr = String(data.packageStatus || data.status || 'CREATED');
+    const lockKey = `TY_${siparisNoStr}_${statusStr}`;
+
+    // Hafıza İçi Mükerrer Kontrolü (15 saniye içinde gelen BİREBİR AYNI PAKETİ filtreler)
+    if (isOrderLocked(lockKey)) {
+      console.log(`⚠️ Trendyol Sipariş (${lockKey}) peş peşe geldi, hafıza kilidi engelledi 🛑`);
       return;
     }
 
-    console.log(`=== [TRENDYOL CANLI WEBHOOK PAKETİ GELDI: ${siparisNoStr}] ===`);
+    console.log(`=== [TRENDYOL CANLI WEBHOOK PAKETİ GELDI: ${siparisNoStr} - Status: ${statusStr}] ===`);
 
-    // İptal Paketi mi Kontrol Et
     const isCancel = data.packageStatus === 'UnSupplied' || data.status === 'UnSupplied' || data.cancelInfo != null;
     
     if (isCancel) {
@@ -315,7 +326,6 @@ app.post('/webhook/trendyol', async (req, res) => {
     const paymentObj = data.payment || {};
     const brutTutar = Number(data.totalPrice || paymentObj.totalPrice || paymentObj.price || 0);
 
-    // İndirim Hesaplayıcı
     let indirimSum = 0;
     if (Array.isArray(data.promotions)) {
       indirimSum = data.promotions.reduce((acc, p) => acc + Number(p.totalSellerAmount || p.amount || 0), 0);
@@ -482,16 +492,19 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
   try {
     const data = req.body;
     const orderObj = data.order || data;
-    const siparisNoStr = String(orderObj.code || orderObj.order_code || orderObj.id || '');
+    const siparisNoStr = String(orderObj.code || orderObj.order_code || orderObj.id || '').trim();
 
     if (!siparisNoStr) return;
 
-    if (isOrderLocked(siparisNoStr)) {
-      console.log(`⚠️ Yemeksepeti Sipariş (${siparisNoStr}) peş peşe geldi, hafıza kilidi engelledi 🛑`);
+    const statusStr = String(data.status || orderObj.status || 'CREATED');
+    const lockKey = `YS_${siparisNoStr}_${statusStr}`;
+
+    if (isOrderLocked(lockKey)) {
+      console.log(`⚠️ Yemeksepeti Sipariş (${lockKey}) peş peşe geldi, hafıza kilidi engelledi 🛑`);
       return;
     }
 
-    console.log(`=== [YEMEKSEPETİ CANLI WEBHOOK PAKETİ GELDI: ${siparisNoStr}] ===`);
+    console.log(`=== [YEMEKSEPETİ CANLI WEBHOOK PAKETİ GELDI: ${siparisNoStr} - Status: ${statusStr}] ===`);
 
     const isCancel = data.status === 'cancelled' || orderObj.status === 'cancelled';
     if (isCancel) {
