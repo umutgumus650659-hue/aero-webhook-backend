@@ -7,6 +7,22 @@ app.use(express.json());
 
 const FIRESTORE_BASE_URL = 'https://firestore.googleapis.com/v1/projects/shopier-1d17c/databases/(default)/documents';
 
+// 🚀 HAFIZA İÇİ MÜKERRER KİLİT MEKANİZMASI (Race Condition %100 Engeller)
+const processingOrdersLock = new Map();
+
+function isOrderLocked(siparisNo) {
+  if (!siparisNo) return false;
+  const now = Date.now();
+  if (processingOrdersLock.has(siparisNo)) {
+    const lockTime = processingOrdersLock.get(siparisNo);
+    if (now - lockTime < 30000) { // 30 Saniye boyunca kilitle
+      return true;
+    }
+  }
+  processingOrdersLock.set(siparisNo, now);
+  return false;
+}
+
 // Sağlık Kontrolü
 app.get('/', (req, res) => {
   res.send('AERO Webhook Backend - CANLI MOD AKTİF 🟢');
@@ -95,45 +111,26 @@ async function getIsletmeBilgileri(targetId, storeId = '', rawStoreName = '') {
   };
 }
 
-// GÜÇLENDİRİLMİŞ MÜKERRER SİPARİŞ KONTROLÜ VE FİRESTORE KAYIT
+// 🚀 DETERMINISTIC FIRESTORE DOKÜMAN KAYDI (DOKÜMAN ID = SİPARİŞ NO)
 async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
   try {
-    const checkQuery = {
-      structuredQuery: {
-        from: [{ collectionId: 'siparisler' }],
-        where: {
-          fieldFilter: {
-            field: { fieldPath: 'siparisNo' },
-            op: 'EQUAL',
-            value: { stringValue: String(siparisNo) }
-          }
-        },
-        limit: 1
-      }
-    };
-
-    const checkRes = await fetch(`${FIRESTORE_BASE_URL}:runQuery`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(checkQuery)
-    });
-
-    if (checkRes.ok) {
-      const checkData = await checkRes.json();
-      if (checkData && checkData[0] && checkData[0].document) {
-        console.log(`⚠️ Sipariş (${siparisNo}) zaten mevcut, mükerrer kayıt engellendi 🛑`);
-        return false;
-      }
-    }
-
-    await fetch(`${FIRESTORE_BASE_URL}/siparisler`, {
-      method: 'POST',
+    const safeDocId = String(siparisNo).replace(/[^a-zA-Z0-9_-]/g, '_');
+    
+    // Doğrudan Doküman Numarasına PATCH (Upsert) yapıyoruz
+    const saveRes = await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(firestoreDocument)
     });
-    return true;
+
+    if (saveRes.ok) {
+      return true;
+    } else {
+      console.error(`Firestore Kayıt Başarısız (${safeDocId}):`, await saveRes.text());
+      return false;
+    }
   } catch (e) {
-    console.error('Firestore Kayıt / Mükerrer Kontrol Hatası:', e.message);
+    console.error('Firestore Kayıt Hatası:', e.message);
     return false;
   }
 }
@@ -168,7 +165,9 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
     let tyStatus = 'Picking';
     const dLower = String(durum).toLowerCase().trim();
 
-    if (dLower.includes('kabul') || dLower.includes('onay')) {
+    if (dLower.includes('iptal') || dLower.includes('unsupplied')) {
+      tyStatus = 'UnSupplied';
+    } else if (dLower.includes('kabul') || dLower.includes('onay')) {
       tyStatus = 'Picking';
     } else if (dLower.includes('teslim')) {
       tyStatus = 'Delivered';
@@ -207,7 +206,9 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
     let ysStatus = 'in_preparation';
     const dLower = String(durum).toLowerCase().trim();
 
-    if (dLower.includes('kabul') || dLower.includes('onay')) {
+    if (dLower.includes('iptal') || dLower.includes('cancel')) {
+      ysStatus = 'cancelled';
+    } else if (dLower.includes('kabul') || dLower.includes('onay')) {
       ysStatus = 'accepted';
     } else if (dLower.includes('teslim')) {
       ysStatus = 'delivered';
@@ -271,32 +272,55 @@ app.post('/webhook/trendyol', async (req, res) => {
   // 1. TRENDYOL'A ANINDA RESPOND VER (6 DEFA TEKRARLAMASINI ENGELLER!)
   res.status(200).json({ status: 'OK', message: 'Paket alındı.' });
 
-  console.log('=== [TRENDYOL CANLI WEBHOOK PAKETİ GELDI] ===');
-  console.log(JSON.stringify(req.body, null, 2));
-
   try {
     const data = req.body;
-    const targetSupplierId = String(data.supplierId || data.merchantId || data.restaurantId || '');
-    const storeId = String(data.storeId || '');
+    const siparisNoStr = String(data.orderNumber || data.orderId || data.id || '');
 
-    if (!targetSupplierId && !storeId) {
-      console.log('⚠️ supplierId / storeId bulunamadı.');
+    if (!siparisNoStr) return;
+
+    // Hafıza İçi Mükerrer Kontrolü (Peş peşe gelen 6 isteği anında süzgeçten geçirir)
+    if (isOrderLocked(siparisNoStr)) {
+      console.log(`⚠️ Trendyol Sipariş (${siparisNoStr}) peş peşe geldi, hafıza kilidi engelledi 🛑`);
       return;
     }
+
+    console.log(`=== [TRENDYOL CANLI WEBHOOK PAKETİ GELDI: ${siparisNoStr}] ===`);
+
+    // İptal Paketi mi Kontrol Et
+    const isCancel = data.packageStatus === 'UnSupplied' || data.status === 'UnSupplied' || data.cancelInfo != null;
+    
+    if (isCancel) {
+      const safeDocId = siparisNoStr.replace(/[^a-zA-Z0-9_-]/g, '_');
+      console.log(`🛑 Trendyol Siparişi İPTAL Edildi: ${siparisNoStr}`);
+      await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fields: {
+            durum: { stringValue: 'İptal Edildi' },
+            status: { stringValue: 'IPTAL' }
+          }
+        })
+      });
+      return;
+    }
+
+    const targetSupplierId = String(data.supplierId || data.merchantId || data.restaurantId || '');
+    const storeId = String(data.storeId || '');
 
     const rawStoreName = data.storeName || data.sellerName || data.supplierName || '';
     const isletmeInfo = await getIsletmeBilgileri(targetSupplierId, storeId, rawStoreName);
     const nowIso = new Date().toISOString();
     
     const paymentObj = data.payment || {};
-    const tutarVal = Number(
-      data.totalPrice || 
-      paymentObj.totalPrice || 
-      paymentObj.price || 
-      data.grossAmount || 
-      data.totalAmount ||
-      0
-    );
+    const brutTutar = Number(data.totalPrice || paymentObj.totalPrice || paymentObj.price || 0);
+
+    // İndirim Hesaplayıcı
+    let indirimSum = 0;
+    if (Array.isArray(data.promotions)) {
+      indirimSum = data.promotions.reduce((acc, p) => acc + Number(p.totalSellerAmount || p.amount || 0), 0);
+    }
+    const netTutarVal = Math.max(0, brutTutar - indirimSum);
 
     const customerObj = data.customer || {};
     const addrObj = data.address || data.deliveryAddress || data.shipmentAddress || {};
@@ -358,7 +382,7 @@ app.post('/webhook/trendyol', async (req, res) => {
       urunMetni = rawLines.map(l => {
         const q = Number(l.quantity || l.count || l.adet || 1);
         const pName = l.name || l.productName || l.description || 'Ürün';
-        const priceVal = Number(l.price || l.unitSellingPrice || l.unitPrice || (tutarVal > 0 ? tutarVal / rawLines.length : 0));
+        const priceVal = Number(l.price || l.unitSellingPrice || l.unitPrice || 0);
 
         sepetArray.push({
           mapValue: {
@@ -376,21 +400,7 @@ app.post('/webhook/trendyol', async (req, res) => {
         }
         return `• ${q}x ${pName}${opts}`;
       }).join('\n');
-    } else {
-      urunMetni = '• 1x Sipariş Ürünü';
-      sepetArray.push({
-        mapValue: {
-          fields: {
-            isim: { stringValue: 'Sipariş Ürünü' },
-            adet: { integerValue: "1" },
-            fiyat: { doubleValue: tutarVal }
-          }
-        }
-      });
     }
-
-    // Benzersiz Sipariş Numarası Ayıklama
-    const siparisNoStr = String(data.orderNumber || data.orderId || data.id || 'TR-' + Date.now());
 
     const firestoreDocument = {
       fields: {
@@ -407,8 +417,10 @@ app.post('/webhook/trendyol', async (req, res) => {
         kanal: { stringValue: 'Trendyol' },
         platform: { stringValue: 'TRENDYOL' },
 
-        tutar: { doubleValue: tutarVal },
-        toplamTutar: { doubleValue: tutarVal },
+        tutar: { doubleValue: brutTutar },
+        toplamTutar: { doubleValue: brutTutar },
+        indirimTutari: { doubleValue: indirimSum },
+        netTutar: { doubleValue: netTutarVal },
 
         sepet: { arrayValue: { values: sepetArray } },
 
@@ -455,7 +467,7 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     const isSaved = await checkDuplicateAndSave(siparisNoStr, firestoreDocument);
     if (isSaved) {
-      console.log(`✅ Trendyol Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${tutarVal} TL) [Ödeme: ${odemeYontemi}]`);
+      console.log(`✅ Trendyol Siparişi Kaydedildi: [${isletmeInfo.isletmeAdi}] - ${mAd} (${brutTutar} TL) [Ödeme: ${odemeYontemi}]`);
     }
 
   } catch (error) {
@@ -467,28 +479,43 @@ app.post('/webhook/trendyol', async (req, res) => {
 app.post('/webhook/yemeksepeti', async (req, res) => {
   res.status(200).json({ status: 'OK' });
 
-  console.log('=== [YEMEKSEPETİ CANLI WEBHOOK PAKETİ GELDI] ===');
-  console.log(JSON.stringify(req.body, null, 2));
-
   try {
     const data = req.body;
     const orderObj = data.order || data;
-    
+    const siparisNoStr = String(orderObj.code || orderObj.order_code || orderObj.id || '');
+
+    if (!siparisNoStr) return;
+
+    if (isOrderLocked(siparisNoStr)) {
+      console.log(`⚠️ Yemeksepeti Sipariş (${siparisNoStr}) peş peşe geldi, hafıza kilidi engelledi 🛑`);
+      return;
+    }
+
+    console.log(`=== [YEMEKSEPETİ CANLI WEBHOOK PAKETİ GELDI: ${siparisNoStr}] ===`);
+
+    const isCancel = data.status === 'cancelled' || orderObj.status === 'cancelled';
+    if (isCancel) {
+      const safeDocId = siparisNoStr.replace(/[^a-zA-Z0-9_-]/g, '_');
+      console.log(`🛑 Yemeksepeti Siparişi İPTAL Edildi: ${siparisNoStr}`);
+      await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fields: {
+            durum: { stringValue: 'İptal Edildi' },
+            status: { stringValue: 'IPTAL' }
+          }
+        })
+      });
+      return;
+    }
+
     const targetRestaurantId = String(data.vendor_id || data.restaurantId || data.vendorId || orderObj.vendor_id || '');
-
-    if (!targetRestaurantId) return;
-
     const rawStoreName = data.vendorName || data.restaurantName || orderObj.vendor_name || '';
     const isletmeInfo = await getIsletmeBilgileri(targetRestaurantId, '', rawStoreName);
     const nowIso = new Date().toISOString();
     
-    const tutarVal = Number(
-      orderObj.price?.grand_total || 
-      orderObj.price?.total ||
-      data.price?.total || 
-      data.totalAmount || 
-      0
-    );
+    const tutarVal = Number(orderObj.price?.grand_total || orderObj.price?.total || data.price?.total || 0);
 
     const customerObj = orderObj.customer || data.customer || {};
     const delivObj = orderObj.delivery || data.delivery || data.address || {};
@@ -529,7 +556,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       urunMetni = rawItems.map(i => {
         const q = Number(i.quantity || i.count || 1);
         const pName = i.name || i.productName || 'Ürün';
-        const priceVal = Number(i.unit_price || i.price || (tutarVal > 0 ? tutarVal / rawItems.length : 0));
+        const priceVal = Number(i.unit_price || i.price || 0);
 
         sepetArray.push({
           mapValue: {
@@ -543,20 +570,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 
         return `• ${q}x ${pName}`;
       }).join('\n');
-    } else {
-      urunMetni = '• 1x Sipariş Ürünü';
-      sepetArray.push({
-        mapValue: {
-          fields: {
-            isim: { stringValue: 'Sipariş Ürünü' },
-            adet: { integerValue: "1" },
-            fiyat: { doubleValue: tutarVal }
-          }
-        }
-      });
     }
-
-    const siparisNoStr = String(orderObj.code || orderObj.order_code || orderObj.id || 'YS-' + Date.now());
 
     const firestoreDocument = {
       fields: {
@@ -636,6 +650,7 @@ app.post('/update-order-status', async (req, res) => {
       return res.status(400).json({ error: 'siparisId ve durum parametreleri zorunludur.' });
     }
 
+    const safeDocId = String(siparisId).replace(/[^a-zA-Z0-9_-]/g, '_');
     const updateBody = {
       fields: {
         durum: { stringValue: durum },
@@ -643,7 +658,7 @@ app.post('/update-order-status', async (req, res) => {
       }
     };
 
-    await fetch(`${FIRESTORE_BASE_URL}/siparisler/${siparisId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
+    await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updateBody)
