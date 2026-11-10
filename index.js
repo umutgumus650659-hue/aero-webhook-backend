@@ -7,14 +7,14 @@ app.use(express.json());
 
 const FIRESTORE_BASE_URL = 'https://firestore.googleapis.com/v1/projects/shopier-1d17c/databases/(default)/documents';
 
-// 🚀 AKILLI HAFIZA İÇİ MÜKERRER KİLİT MEKANİZMASI (Memory Leak Korumalı)
+// 🚀 1. GELİŞTİRİLMİŞ MÜKERRER KİLİT MEKANİZMASI (Kilit Süresi 3 Dakikaya Çıkarıldı)
 const processingOrdersLock = new Map();
 
-// Bellek şişmesini önlemek için her 10 dakikada bir eski kilitleri temizle
+// Bellek şişmesini önlemek için her 10 dakikada bir 3 dakikadan eski kilitleri temizle
 setInterval(() => {
   const now = Date.now();
   for (const [key, lockTime] of processingOrdersLock.entries()) {
-    if (now - lockTime > 60000) { // 1 dakikadan eski kilitleri sil
+    if (now - lockTime > 3 * 60 * 1000) { 
       processingOrdersLock.delete(key);
     }
   }
@@ -25,13 +25,27 @@ function isOrderLocked(lockKey) {
   const now = Date.now();
   if (processingOrdersLock.has(lockKey)) {
     const lockTime = processingOrdersLock.get(lockKey);
-    if (now - lockTime < 15000) { // 15 Saniye boyunca tam aynı paketi kilitle
+    // Tam aynı paket gelirse 3 DAKİKA (180 saniye) boyunca tamamen engelle!
+    if (now - lockTime < 3 * 60 * 1000) { 
       return true;
     }
   }
   processingOrdersLock.set(lockKey, now);
   return false;
 }
+
+// 🚀 2. RENDER SUNUCUSUNU 7/24 UYANIK TUTAN SELF-PING (Uyku Modu Kalkanı)
+// Her 4 dakikada bir kendi kendine hafif bir ping atarak Render'ın uyumasını %100 engeller.
+setInterval(async () => {
+  try {
+    const renderUrl = process.env.RENDER_EXTERNAL_URL || 'http://localhost:10000';
+    await fetch(`${renderUrl}/health-ping`);
+  } catch (e) {
+    // Sessiz geç
+  }
+}, 4 * 60 * 1000);
+
+app.get('/health-ping', (req, res) => res.send('OK'));
 
 // Sağlık Kontrolü
 app.get('/', (req, res) => {
@@ -121,7 +135,7 @@ async function getIsletmeBilgileri(targetId, storeId = '', rawStoreName = '') {
   };
 }
 
-// 🚀 AKILLI DOKÜMAN KORUMALI FIRESTORE KAYIT (KURYE/DURUM KORUMASI EKLENDİ)
+// 🚀 3. TAM KORUMALI FIRESTORE KAYIT (SİPARİŞ DOKÜMANI HİÇBİR DURUMDA EZİLMEZ)
 async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
   try {
     const safeDocId = String(siparisNo).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -134,7 +148,6 @@ async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
       if (existingDoc && existingDoc.fields) {
         const exFields = existingDoc.fields;
         
-        // Kurye Atanmış mı? (kuryeId dolu mu?)
         const currentKuryeId = exFields.kuryeId?.stringValue || '';
         const currentKuryeAdi = exFields.kuryeAdi?.stringValue || '';
         const currentDurum = exFields.durum?.stringValue || '';
@@ -143,7 +156,7 @@ async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
         const havuzdaVal = exFields.havuzdaMi?.booleanValue ?? false;
         const isWebArsivVal = exFields.isWebArsiv?.booleanValue ?? false;
 
-        // EĞER SİPARİŞ ZATEN BİR KURYE İLE EŞLEŞTİYSE VEYA HAZIRLANDIYSA/YOLDAYSA KURYE BİLGİLERİNİ VE DURUMUNU KORU!
+        // EĞER SİPARİŞ ZATEN KURYEYE ATANDIYSA VEYA İŞLETME YÖNETİMİ DURUMUNU DEĞİŞTİRDİYSE WEBHOOK'UN BOMBOŞ VERİLERİ EZEMEZ!
         if (currentKuryeId && currentKuryeId !== '' && currentKuryeId !== 'yok') {
           firestoreDocument.fields.kuryeId = { stringValue: currentKuryeId };
           if (currentKuryeAdi) firestoreDocument.fields.kuryeAdi = { stringValue: currentKuryeAdi };
@@ -153,7 +166,6 @@ async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
           firestoreDocument.fields.havuzdaMi = { booleanValue: havuzdaVal };
           firestoreDocument.fields.isWebArsiv = { booleanValue: isWebArsivVal };
         } else if (currentDurum && currentDurum !== 'YENI' && currentDurum !== 'yeni') {
-          // Kurye henüz atanmamış olsa bile işletme durumunu (Hazırlandı, Havuzda Bekliyor vb.) koru
           firestoreDocument.fields.durum = { stringValue: currentDurum };
           if (currentStatus) firestoreDocument.fields.status = { stringValue: currentStatus };
           firestoreDocument.fields.isHazir = { booleanValue: isHazirVal };
@@ -194,7 +206,7 @@ async function getIsletmeEntegrasyonByEmail(email) {
         return {
           trSupplierId: fields.trSupplierId?.stringValue || '',
           trApiKey: fields.trApiKey?.stringValue || '',
-          trApiSecret: fields.trApiSecret?.stringValue || '',
+          trApiSecret: fields.trApiKey?.stringValue || '',
           ysRestoranId: fields.ysRestoranId?.stringValue || '',
           ysToken: fields.ysToken?.stringValue || ''
         };
@@ -312,22 +324,18 @@ function parseOdemeTipi(paymentObj, dataRoot = {}) {
 
 // 2. TRENDYOL CANLI WEBHOOK ROUTE
 app.post('/webhook/trendyol', async (req, res) => {
-  // 1. TRENDYOL'A ANINDA HTTP 200 RESPOND VER (Mükerrer İstekleri Keser!)
   res.status(200).json({ status: 'OK', message: 'Paket alındı.' });
 
   try {
     const data = req.body;
-    
-    // Sipariş numarasını kesinleştir
     const siparisNoStr = String(data.orderNumber || data.packageNumber || data.orderId || data.id || '').trim();
 
     if (!siparisNoStr) return;
 
-    // Paket Statüsü ile Birlikte Kilit Anahtarı Oluştur
     const statusStr = String(data.packageStatus || data.status || 'CREATED');
     const lockKey = `TY_${siparisNoStr}_${statusStr}`;
 
-    // Hafıza İçi Mükerrer Kontrolü (15 saniye içinde gelen BİREBİR AYNI PAKETİ filtreler)
+    // 3 DAKİKALIK MÜKERRER ENGELİ
     if (isOrderLocked(lockKey)) {
       console.log(`⚠️ Trendyol Sipariş (${lockKey}) peş peşe geldi, hafıza kilidi engelledi 🛑`);
       return;
@@ -692,7 +700,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
   }
 });
 
-// 4. DURUM GÜNCELLEME VEYA GERİ BİLDİRİM TETİKLEME
+// 🚀 4. GÜVENLİ DURUM GÜNCELLEME VE WEB PANELİ - KURYE SENKRONİZASYONU
 app.post('/update-order-status', async (req, res) => {
   try {
     const { siparisId, durum, kanal, isletmeEmail } = req.body;
@@ -701,6 +709,12 @@ app.post('/update-order-status', async (req, res) => {
     }
 
     const safeDocId = String(siparisId).replace(/[^a-zA-Z0-9_-]/g, '_');
+    
+    // İşletme "Hazırlandı" veya "Hazır" dediğinde kurye havuzunda görünmesini sağla!
+    const isHazirDurum = durum.toLowerCase().includes('hazır') || durum.toLowerCase().includes('hazirlan');
+    
+    let updateUrl = `${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`;
+    
     const updateBody = {
       fields: {
         durum: { stringValue: durum },
@@ -708,7 +722,12 @@ app.post('/update-order-status', async (req, res) => {
       }
     };
 
-    await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
+    if (isHazirDurum) {
+      updateUrl += `&updateMask.fieldPaths=isHazir`;
+      updateBody.fields.isHazir = { booleanValue: true };
+    }
+
+    await fetch(updateUrl, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updateBody)
