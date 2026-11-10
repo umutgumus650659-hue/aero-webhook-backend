@@ -121,13 +121,50 @@ async function getIsletmeBilgileri(targetId, storeId = '', rawStoreName = '') {
   };
 }
 
-// 🚀 DETERMINISTIC FIRESTORE DOKÜMAN KAYDI (DOKÜMAN ID = SİPARİŞ NO)
+// 🚀 AKILLI DOKÜMAN KORUMALI FIRESTORE KAYIT (KURYE/DURUM KORUMASI EKLENDİ)
 async function checkDuplicateAndSave(siparisNo, firestoreDocument) {
   try {
     const safeDocId = String(siparisNo).replace(/[^a-zA-Z0-9_-]/g, '_');
-    
-    // Doğrudan Doküman Numarasına PATCH (Upsert) yapıyoruz
-    const saveRes = await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}`, {
+    const docUrl = `${FIRESTORE_BASE_URL}/siparisler/${safeDocId}`;
+
+    // 1. Önce Veritabanındaki Mevcut Siparişi Kontrol Et
+    const existingRes = await fetch(docUrl);
+    if (existingRes.ok) {
+      const existingDoc = await existingRes.json();
+      if (existingDoc && existingDoc.fields) {
+        const exFields = existingDoc.fields;
+        
+        // Kurye Atanmış mı? (kuryeId dolu mu?)
+        const currentKuryeId = exFields.kuryeId?.stringValue || '';
+        const currentKuryeAdi = exFields.kuryeAdi?.stringValue || '';
+        const currentDurum = exFields.durum?.stringValue || '';
+        const currentStatus = exFields.status?.stringValue || '';
+        const isHazirVal = exFields.isHazir?.booleanValue ?? false;
+        const havuzdaVal = exFields.havuzdaMi?.booleanValue ?? false;
+        const isWebArsivVal = exFields.isWebArsiv?.booleanValue ?? false;
+
+        // EĞER SİPARİŞ ZATEN BİR KURYE İLE EŞLEŞTİYSE VEYA HAZIRLANDIYSA/YOLDAYSA KURYE BİLGİLERİNİ VE DURUMUNU KORU!
+        if (currentKuryeId && currentKuryeId !== '' && currentKuryeId !== 'yok') {
+          firestoreDocument.fields.kuryeId = { stringValue: currentKuryeId };
+          if (currentKuryeAdi) firestoreDocument.fields.kuryeAdi = { stringValue: currentKuryeAdi };
+          if (currentDurum) firestoreDocument.fields.durum = { stringValue: currentDurum };
+          if (currentStatus) firestoreDocument.fields.status = { stringValue: currentStatus };
+          firestoreDocument.fields.isHazir = { booleanValue: isHazirVal };
+          firestoreDocument.fields.havuzdaMi = { booleanValue: havuzdaVal };
+          firestoreDocument.fields.isWebArsiv = { booleanValue: isWebArsivVal };
+        } else if (currentDurum && currentDurum !== 'YENI' && currentDurum !== 'yeni') {
+          // Kurye henüz atanmamış olsa bile işletme durumunu (Hazırlandı, Havuzda Bekliyor vb.) koru
+          firestoreDocument.fields.durum = { stringValue: currentDurum };
+          if (currentStatus) firestoreDocument.fields.status = { stringValue: currentStatus };
+          firestoreDocument.fields.isHazir = { booleanValue: isHazirVal };
+          firestoreDocument.fields.havuzdaMi = { booleanValue: havuzdaVal };
+          firestoreDocument.fields.isWebArsiv = { booleanValue: isWebArsivVal };
+        }
+      }
+    }
+
+    // 2. Güvenli Hale Getirilmiş Dokümanı PATCH Et
+    const saveRes = await fetch(docUrl, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(firestoreDocument)
@@ -281,7 +318,7 @@ app.post('/webhook/trendyol', async (req, res) => {
   try {
     const data = req.body;
     
-    // Sipariş numarasını kesinleştir (Trendyol'da en kararlı alan orderNumber veya packageNumber'dır)
+    // Sipariş numarasını kesinleştir
     const siparisNoStr = String(data.orderNumber || data.packageNumber || data.orderId || data.id || '').trim();
 
     if (!siparisNoStr) return;
