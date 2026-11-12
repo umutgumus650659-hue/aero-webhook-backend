@@ -8,9 +8,10 @@ app.use(express.json({ limit: '2mb' }));
 const FIRESTORE_BASE_URL = 'https://firestore.googleapis.com/v1/projects/shopier-1d17c/databases/(default)/documents';
 
 // ============================================================================
-// 1. MÜKERRER İSTEK KİLİDİ & SUNUCU UYKU KALKANI
+// 1. MÜKERRER İSTEK KİLİDİ, EŞZAMANLI İŞLEM KUYRUĞU & UYKU KALKANI
 // ============================================================================
 const processingOrdersLock = new Map();
+const orderExecutionQueues = new Map(); // Aynı siparişin milisaniyelik çakışmalarını sıraya sokar
 const LOCK_TTL_MS = 3 * 60 * 1000; // 3 Dakika
 
 setInterval(() => {
@@ -28,6 +29,22 @@ function isOrderLocked(lockKey) {
   }
   processingOrdersLock.set(lockKey, now);
   return false;
+}
+
+// Aynı sipariş numarasına gelen eşzamanlı istekleri tek tek sıraya sokan Mutex Kalkanı
+function runInOrderQueue(siparisNo, taskFn) {
+  const key = String(siparisNo);
+  const previousTask = orderExecutionQueues.get(key) || Promise.resolve();
+  const currentTask = previousTask
+    .then(() => taskFn())
+    .catch((err) => console.error(`Kuyruk İşlem Hatası (${key}):`, err.message))
+    .finally(() => {
+      if (orderExecutionQueues.get(key) === currentTask) {
+        orderExecutionQueues.delete(key);
+      }
+    });
+  orderExecutionQueues.set(key, currentTask);
+  return currentTask;
 }
 
 // Render Cold-Start (Uyku Modu) Engelleyici
@@ -103,82 +120,85 @@ async function getIsletmeBilgileri(targetId, storeId = '', rawStoreName = '') {
   };
 }
 
-// Mevcut sipariş dokümanını okur; boş/eksik gelen hiçbir alanın gerçek veriyi ezmesine izin vermez.
+// Mevcut sipariş dokümanını kuyruk kilidi altında okur; boş/eksik gelen hiçbir alan gerçek veriyi ezmez.
 async function saveOrMergeOrder(siparisNo, incomingFields) {
-  try {
-    const safeDocId = String(siparisNo).replace(/[^a-zA-Z0-9_-]/g, '_');
-    const docUrl = `${FIRESTORE_BASE_URL}/siparisler/${safeDocId}`;
+  return runInOrderQueue(siparisNo, async () => {
+    try {
+      const safeDocId = String(siparisNo).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const docUrl = `${FIRESTORE_BASE_URL}/siparisler/${safeDocId}`;
 
-    let existingFields = null;
-    const existingRes = await fetch(docUrl);
-    if (existingRes.ok) {
-      const existingDoc = await existingRes.json();
-      existingFields = existingDoc?.fields || null;
-    }
+      let existingFields = null;
+      const existingRes = await fetch(docUrl);
+      if (existingRes.ok) {
+        const existingDoc = await existingRes.json();
+        existingFields = existingDoc?.fields || null;
+      }
 
-    const finalFields = existingFields ? { ...existingFields } : {};
+      const finalFields = existingFields ? { ...existingFields } : {};
 
-    // Gelen alanlardan yalnızca gerçekten dolu olanları yaz
-    for (const [key, valObj] of Object.entries(incomingFields)) {
-      if (!valObj) continue;
+      for (const [key, valObj] of Object.entries(incomingFields)) {
+        if (!valObj) continue;
 
-      if ('stringValue' in valObj) {
-        const strVal = valObj.stringValue.trim();
-        // Boş string veya genel jenerik isimler mevcut gerçek veriyi ezemez
-        const isGeneric = ['RESTORAN', 'Trendyol Müşterisi', 'Yemeksepeti Müşterisi', 'Adres Belirtilmedi'].includes(strVal);
-        if (strVal !== '' && !(isGeneric && existingFields?.[key]?.stringValue)) {
-          finalFields[key] = valObj;
-        } else if (!existingFields) {
-          finalFields[key] = valObj;
-        }
-      } else if ('doubleValue' in valObj) {
-        if (valObj.doubleValue !== 0 || !existingFields?.[key]?.doubleValue) {
-          finalFields[key] = valObj;
-        }
-      } else if ('arrayValue' in valObj) {
-        const hasItems = (valObj.arrayValue?.values?.length || 0) > 0;
-        if (hasItems || !existingFields?.[key]?.arrayValue?.values?.length) {
-          finalFields[key] = valObj;
-        }
-      } else {
-        if (!existingFields || !(key in existingFields)) {
-          finalFields[key] = valObj;
+        if ('stringValue' in valObj) {
+          const strVal = valObj.stringValue.trim();
+          const isGeneric = ['RESTORAN', 'Trendyol Müşterisi', 'Yemeksepeti Müşterisi', 'Adres Belirtilmedi'].includes(strVal);
+          if (strVal !== '' && !(isGeneric && existingFields?.[key]?.stringValue)) {
+            finalFields[key] = valObj;
+          } else if (!existingFields) {
+            finalFields[key] = valObj;
+          }
+        } else if ('doubleValue' in valObj) {
+          if (valObj.doubleValue !== 0 || !existingFields?.[key]?.doubleValue) {
+            finalFields[key] = valObj;
+          }
+        } else if ('arrayValue' in valObj) {
+          const hasItems = (valObj.arrayValue?.values?.length || 0) > 0;
+          if (hasItems || !existingFields?.[key]?.arrayValue?.values?.length) {
+            finalFields[key] = valObj;
+          }
+        } else {
+          if (!existingFields || !(key in existingFields)) {
+            finalFields[key] = valObj;
+          }
         }
       }
-    }
 
-    // Operasyonel durum ve kurye ataması varsa kesinlikle koru
-    if (existingFields) {
-      const exKurye = existingFields.kuryeId?.stringValue || '';
-      const exDurum = existingFields.durum?.stringValue || '';
-      if ((exKurye && exKurye !== 'yok') || (exDurum && exDurum.toUpperCase() !== 'YENI')) {
-        if (existingFields.kuryeId) finalFields.kuryeId = existingFields.kuryeId;
-        if (existingFields.kuryeAdi) finalFields.kuryeAdi = existingFields.kuryeAdi;
-        if (existingFields.durum) finalFields.durum = existingFields.durum;
-        if (existingFields.status) finalFields.status = existingFields.status;
-        if (existingFields.isHazir !== undefined) finalFields.isHazir = existingFields.isHazir;
-        if (existingFields.havuzdaMi !== undefined) finalFields.havuzdaMi = existingFields.havuzdaMi;
-        if (existingFields.isWebArsiv !== undefined) finalFields.isWebArsiv = existingFields.isWebArsiv;
+      // Operasyonel durum, kurye ataması ve isHazir bayrağını kesinlikle koru
+      if (existingFields) {
+        const exKurye = existingFields.kuryeId?.stringValue || '';
+        const exDurum = existingFields.durum?.stringValue || '';
+        const exHazir = existingFields.isHazir?.booleanValue === true;
+
+        if (exHazir) finalFields.isHazir = toBool(true);
+        if (existingFields.havuzdaMi?.booleanValue === true) finalFields.havuzdaMi = toBool(true);
+        if (existingFields.isWebArsiv?.booleanValue === true) finalFields.isWebArsiv = toBool(true);
+
+        if ((exKurye && exKurye !== 'yok') || (exDurum && exDurum.toUpperCase() !== 'YENI')) {
+          if (existingFields.kuryeId) finalFields.kuryeId = existingFields.kuryeId;
+          if (existingFields.kuryeAdi) finalFields.kuryeAdi = existingFields.kuryeAdi;
+          if (existingFields.durum) finalFields.durum = existingFields.durum;
+          if (existingFields.status) finalFields.status = existingFields.status;
+        }
+        if (existingFields.tarih) finalFields.tarih = existingFields.tarih;
+        if (existingFields.createdAt) finalFields.createdAt = existingFields.createdAt;
       }
-      if (existingFields.tarih) finalFields.tarih = existingFields.tarih;
-      if (existingFields.createdAt) finalFields.createdAt = existingFields.createdAt;
-    }
 
-    const saveRes = await fetch(docUrl, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fields: finalFields })
-    });
+      const saveRes = await fetch(docUrl, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: finalFields })
+      });
 
-    if (!saveRes.ok) {
-      console.error(`Firestore Yazma Hatası (${safeDocId}):`, await saveRes.text());
+      if (!saveRes.ok) {
+        console.error(`Firestore Yazma Hatası (${safeDocId}):`, await saveRes.text());
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.error('saveOrMergeOrder Hatası:', e.message);
       return false;
     }
-    return true;
-  } catch (e) {
-    console.error('saveOrMergeOrder Hatası:', e.message);
-    return false;
-  }
+  });
 }
 
 function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
@@ -222,13 +242,14 @@ app.post('/webhook/trendyol', async (req, res) => {
 
     console.log(`=== [TRENDYOL WEBHOOK: ${siparisNo} | Statü: ${statusStr}] ===`);
 
-    // İptal Kontrolü
     if (['UnSupplied', 'Cancelled', 'Canceled'].includes(statusStr) || data.cancelInfo != null) {
-      const safeDocId = siparisNo.replace(/[^a-zA-Z0-9_-]/g, '_');
-      await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fields: { durum: toStr('İptal Edildi'), status: toStr('IPTAL') } })
+      await runInOrderQueue(siparisNo, async () => {
+        const safeDocId = siparisNo.replace(/[^a-zA-Z0-9_-]/g, '_');
+        await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { durum: toStr('İptal Edildi'), status: toStr('IPTAL') } })
+        });
       });
       return;
     }
@@ -238,7 +259,6 @@ app.post('/webhook/trendyol', async (req, res) => {
     const rawStoreName = data.storeName || data.sellerName || data.supplierName || '';
     const isletme = await getIsletmeBilgileri(supplierId, storeId, rawStoreName);
 
-    // Tutar ve İndirim Hesaplama
     const paymentObj = data.payment || {};
     const brutTutar = Number(data.totalPrice || data.grossAmount || paymentObj.totalPrice || paymentObj.price || 0);
     const indirimSum = Array.isArray(data.promotions)
@@ -246,7 +266,6 @@ app.post('/webhook/trendyol', async (req, res) => {
       : Number(data.totalDiscount || 0);
     const netTutar = Math.max(0, brutTutar - indirimSum);
 
-    // Müşteri & Adres & Santral PIN
     const customer = data.customer || {};
     const addr = data.address || data.deliveryAddress || data.shipmentAddress || {};
 
@@ -281,7 +300,6 @@ app.post('/webhook/trendyol', async (req, res) => {
     const lng = Number(addr.longitude || addr.lng || 0) || isletme.restoranBoylam;
     const odemeTipi = parseOdemeTipi(paymentObj, data);
 
-    // Sepet Ürünleri ve Opsiyonlar
     const rawLines = data.lines || data.packageItems || data.items || data.products || [];
     const sepetArray = [];
     const urunSatirlari = [];
@@ -398,11 +416,13 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     console.log(`=== [YEMEKSEPETİ WEBHOOK: ${siparisNo} | Statü: ${statusStr}] ===`);
 
     if (['cancelled', 'canceled', 'rejected'].includes(statusStr.toLowerCase())) {
-      const safeDocId = siparisNo.replace(/[^a-zA-Z0-9_-]/g, '_');
-      await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fields: { durum: toStr('İptal Edildi'), status: toStr('IPTAL') } })
+      await runInOrderQueue(siparisNo, async () => {
+        const safeDocId = siparisNo.replace(/[^a-zA-Z0-9_-]/g, '_');
+        await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { durum: toStr('İptal Edildi'), status: toStr('IPTAL') } })
+        });
       });
       return;
     }
