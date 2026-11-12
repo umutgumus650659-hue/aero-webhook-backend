@@ -11,7 +11,7 @@ const FIRESTORE_BASE_URL = 'https://firestore.googleapis.com/v1/projects/shopier
 // 1. MÜKERRER İSTEK KİLİDİ, EŞZAMANLI İŞLEM KUYRUĞU & UYKU KALKANI
 // ============================================================================
 const processingOrdersLock = new Map();
-const orderExecutionQueues = new Map(); // Aynı siparişin milisaniyelik çakışmalarını sıraya sokar
+const orderExecutionQueues = new Map();
 const LOCK_TTL_MS = 3 * 60 * 1000; // 3 Dakika
 
 setInterval(() => {
@@ -31,7 +31,6 @@ function isOrderLocked(lockKey) {
   return false;
 }
 
-// Aynı sipariş numarasına gelen eşzamanlı istekleri tek tek sıraya sokan Mutex Kalkanı
 function runInOrderQueue(siparisNo, taskFn) {
   const key = String(siparisNo);
   const previousTask = orderExecutionQueues.get(key) || Promise.resolve();
@@ -47,7 +46,6 @@ function runInOrderQueue(siparisNo, taskFn) {
   return currentTask;
 }
 
-// Render Cold-Start (Uyku Modu) Engelleyici
 setInterval(() => {
   const renderUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 10000}`;
   fetch(`${renderUrl}/health-ping`).catch(() => {});
@@ -120,7 +118,6 @@ async function getIsletmeBilgileri(targetId, storeId = '', rawStoreName = '') {
   };
 }
 
-// Mevcut sipariş dokümanını kuyruk kilidi altında okur; boş/eksik gelen hiçbir alan gerçek veriyi ezmez.
 async function saveOrMergeOrder(siparisNo, incomingFields) {
   return runInOrderQueue(siparisNo, async () => {
     try {
@@ -163,7 +160,6 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
         }
       }
 
-      // Operasyonel durum, kurye ataması ve isHazir bayrağını kesinlikle koru
       if (existingFields) {
         const exKurye = existingFields.kuryeId?.stringValue || '';
         const exDurum = existingFields.durum?.stringValue || '';
@@ -201,32 +197,63 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
   });
 }
 
+// NOKTA ATIŞI ÖDEME TİPİ PARSER (NAKİT / KREDİ KARTI / ONLINE)
 function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
-  const onDeliv = paymentObj.onDelivery || {};
-  const mainType = String(paymentObj.paymentType || dataRoot.paymentType || dataRoot.paymentMethod || '').toLowerCase();
-  const subType = String(onDeliv.paymentType || paymentObj.subPaymentType || '').toLowerCase();
-  const mealCard = String(paymentObj.mealCard || paymentObj.mealCardType || '').trim();
+  const orderObj = dataRoot.order || dataRoot;
+  const allText = [
+    dataRoot.paymentMethod,
+    dataRoot.paymentType,
+    dataRoot.payment?.paymentMethod,
+    dataRoot.payment?.paymentType,
+    dataRoot.payment?.type,
+    dataRoot.payment?.subPaymentType,
+    dataRoot.payment?.subType,
+    orderObj.paymentMethod,
+    orderObj.paymentType,
+    orderObj.payment?.paymentMethod,
+    orderObj.payment?.paymentType,
+    orderObj.payment?.type,
+    paymentObj.paymentMethod,
+    paymentObj.paymentType,
+    paymentObj.type,
+    paymentObj.subPaymentType,
+    paymentObj.subType,
+    paymentObj.onDelivery?.paymentType,
+    paymentObj.onDelivery?.type
+  ].filter(Boolean).map(v => String(v).toLowerCase()).join(' ');
 
-  if (mealCard && mealCard.toLowerCase() !== 'null' && mealCard.toLowerCase() !== 'undefined') {
+  const mealCard = String(
+    paymentObj.mealCard || 
+    paymentObj.mealCardType || 
+    dataRoot.mealCard || 
+    dataRoot.mealCardType || ''
+  ).trim();
+
+  if (mealCard && !['null', 'undefined', ''].includes(mealCard.toLowerCase())) {
     return `Yemek Kartı (${mealCard.toUpperCase()})`;
   }
-  if (mainType.includes('on_delivery') || mainType.includes('door') || mainType.includes('kapida')) {
-    if (subType.includes('credit') || subType.includes('card') || subType.includes('pos') || subType.includes('kredi')) {
-      return 'Kapıda Kredi Kartı';
-    }
-    if (subType.includes('meal') || subType.includes('multinet') || subType.includes('sodexo') || subType.includes('ticket')) {
-      return 'Kapıda Yemek Kartı';
-    }
+
+  if (allText.includes('cash') || allText.includes('nakit')) {
     return 'Kapıda Nakit';
   }
-  if (mainType.includes('cash') || mainType.includes('nakit')) return 'Kapıda Nakit';
-  if (mainType.includes('credit') || mainType.includes('pos') || mainType.includes('kredi')) return 'Kapıda Kredi Kartı';
+  if (allText.includes('pos') || allText.includes('credit') || allText.includes('kredi') || allText.includes('card')) {
+    if (allText.includes('door') || allText.includes('delivery') || allText.includes('kapida')) {
+      return 'Kapıda Kredi Kartı';
+    }
+    return 'Kapıda Kredi Kartı';
+  }
+  if (allText.includes('door') || allText.includes('delivery') || allText.includes('kapida') || allText.includes('on_delivery')) {
+    return 'Kapıda Nakit';
+  }
+  if (allText.includes('online') || allText.includes('prepaid') || allText.includes('pay_online')) {
+    return 'Online Ödeme';
+  }
 
   return 'Online Ödeme';
 }
 
 // ============================================================================
-// 3. TRENDYOL GO CANLI WEBHOOK (TAM KAPSAYICI REAL FORMAT)
+// 3. TRENDYOL GO CANLI WEBHOOK
 // ============================================================================
 app.post('/webhook/trendyol', async (req, res) => {
   res.status(200).json({ status: 'OK' });
@@ -352,9 +379,11 @@ app.post('/webhook/trendyol', async (req, res) => {
       kanal: toStr('Trendyol'),
       platform: toStr('TRENDYOL'),
       tutar: toNum(brutTutar),
-      toplamTutar: toNum(brutTutar),
+      brutTutar: toNum(brutTutar),
+      toplamTutar: toNum(netTutar > 0 ? netTutar : brutTutar),
       indirimTutari: toNum(indirimSum),
-      netTutar: toNum(netTutar),
+      discount: toNum(indirimSum),
+      netTutar: toNum(netTutar > 0 ? netTutar : brutTutar),
       sepet: { arrayValue: { values: sepetArray } },
       durum: toStr('YENI'),
       status: toStr('YENI'),
@@ -398,7 +427,7 @@ app.post('/webhook/trendyol', async (req, res) => {
 });
 
 // ============================================================================
-// 4. YEMEKSEPETİ CANLI WEBHOOK (TAM KAPSAYICI REAL FORMAT)
+// 4. YEMEKSEPETİ CANLI WEBHOOK
 // ============================================================================
 app.post('/webhook/yemeksepeti', async (req, res) => {
   res.status(200).json({ status: 'OK' });
@@ -516,9 +545,11 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       kanal: toStr('Yemeksepeti'),
       platform: toStr('YEMEKSEPETI'),
       tutar: toNum(brutTutar),
-      toplamTutar: toNum(brutTutar),
+      brutTutar: toNum(brutTutar),
+      toplamTutar: toNum(netTutar > 0 ? netTutar : brutTutar),
       indirimTutari: toNum(indirimSum),
-      netTutar: toNum(netTutar),
+      discount: toNum(indirimSum),
+      netTutar: toNum(netTutar > 0 ? netTutar : brutTutar),
       sepet: { arrayValue: { values: sepetArray } },
       durum: toStr('YENI'),
       status: toStr('YENI'),
