@@ -136,6 +136,14 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
       for (const [key, valObj] of Object.entries(incomingFields)) {
         if (!valObj) continue;
 
+        // Ödeme tipi ilk kayıtta belirlenmişse sonraki durum webhook'larının ezmesini engelle
+        if (existingFields && (key === 'odemeTipi' || key === 'paymentType')) {
+          const mevcutOdeme = (existingFields[key]?.stringValue || '').trim();
+          if (mevcutOdeme !== '') {
+            continue;
+          }
+        }
+
         if ('stringValue' in valObj) {
           const strVal = valObj.stringValue.trim();
           const isGeneric = ['RESTORAN', 'Trendyol Müşterisi', 'Yemeksepeti Müşterisi', 'Adres Belirtilmedi'].includes(strVal);
@@ -197,10 +205,25 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
   });
 }
 
-// NOKTA ATIŞI ÖDEME TİPİ PARSER (NAKİT / KREDİ KARTI / ONLINE)
+// NOKTA ATIŞI ÖDEME TİPİ PARSER (ONLINE ÖNCELİKLİ & ÇAKIŞMASIZ)
 function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
   const orderObj = dataRoot.order || dataRoot;
-  const allText = [
+
+  // 1. Önce Yemek Kartı kontrolü
+  const mealCard = String(
+    paymentObj.mealCard ||
+    paymentObj.mealCardType ||
+    dataRoot.mealCard ||
+    dataRoot.mealCardType ||
+    orderObj.mealCard || ''
+  ).trim();
+
+  if (mealCard && !['null', 'undefined', ''].includes(mealCard.toLowerCase())) {
+    return `Yemek Kartı (${mealCard.toUpperCase()})`;
+  }
+
+  // 2. Ham ödeme alanlarını topla
+  const rawValues = [
     dataRoot.paymentMethod,
     dataRoot.paymentType,
     dataRoot.payment?.paymentMethod,
@@ -220,33 +243,48 @@ function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
     paymentObj.subType,
     paymentObj.onDelivery?.paymentType,
     paymentObj.onDelivery?.type
-  ].filter(Boolean).map(v => String(v).toLowerCase()).join(' ');
+  ].filter(Boolean).map(v => String(v).toLowerCase().trim());
 
-  const mealCard = String(
-    paymentObj.mealCard || 
-    paymentObj.mealCardType || 
-    dataRoot.mealCard || 
-    dataRoot.mealCardType || ''
-  ).trim();
+  const allText = rawValues.join(' ');
 
-  if (mealCard && !['null', 'undefined', ''].includes(mealCard.toLowerCase())) {
-    return `Yemek Kartı (${mealCard.toUpperCase()})`;
+  // 3. Kesin Online / Ön Ödemeli sinyaller (En yüksek öncelik!)
+  if (
+    paymentObj.isPaid === true ||
+    paymentObj.is_paid === true ||
+    orderObj.isPaid === true ||
+    orderObj.is_paid === true ||
+    allText.includes('online') ||
+    allText.includes('prepaid') ||
+    allText.includes('pay_online') ||
+    rawValues.includes('paid')
+  ) {
+    return 'Online Ödeme';
   }
 
+  // 4. Kesin Nakit sinyalleri
   if (allText.includes('cash') || allText.includes('nakit')) {
     return 'Kapıda Nakit';
   }
-  if (allText.includes('pos') || allText.includes('credit') || allText.includes('kredi') || allText.includes('card')) {
-    if (allText.includes('door') || allText.includes('delivery') || allText.includes('kapida')) {
-      return 'Kapıda Kredi Kartı';
-    }
+
+  // 5. Kesin Kapıda Kart / POS sinyalleri
+  if (
+    allText.includes('pos') ||
+    allText.includes('credit') ||
+    allText.includes('kredi') ||
+    allText.includes('card') ||
+    allText.includes('kart')
+  ) {
     return 'Kapıda Kredi Kartı';
   }
-  if (allText.includes('door') || allText.includes('delivery') || allText.includes('kapida') || allText.includes('on_delivery')) {
+
+  // 6. Sadece açıkça kapıda ödeme belirtilmişse ve kart değilse
+  if (
+    rawValues.includes('on_delivery') ||
+    rawValues.includes('pay_on_delivery') ||
+    rawValues.includes('cash_on_delivery') ||
+    rawValues.includes('cod')
+  ) {
     return 'Kapıda Nakit';
-  }
-  if (allText.includes('online') || allText.includes('prepaid') || allText.includes('pay_online')) {
-    return 'Online Ödeme';
   }
 
   return 'Online Ödeme';
