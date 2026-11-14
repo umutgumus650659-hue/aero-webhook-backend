@@ -205,9 +205,10 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
   });
 }
 
-// NOKTA ATIŞI ÖDEME TİPİ PARSER (ONLINE ÖNCELİKLİ & ÇAKIŞMASIZ)
+// %100 KUSURSUZ NOKTA ATIŞI ÖDEME TİPİ PARSER (KAPIDA VS ONLINE ÇAKIŞMA KORUMALI)
 function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
   const orderObj = dataRoot.order || dataRoot;
+  const onDeliv = paymentObj.onDelivery || {};
 
   // 1. Önce Yemek Kartı kontrolü
   const mealCard = String(
@@ -241,52 +242,36 @@ function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
     paymentObj.type,
     paymentObj.subPaymentType,
     paymentObj.subType,
-    paymentObj.onDelivery?.paymentType,
-    paymentObj.onDelivery?.type
+    onDeliv.paymentType,
+    onDeliv.type
   ].filter(Boolean).map(v => String(v).toLowerCase().trim());
 
   const allText = rawValues.join(' ');
 
-  // 3. Kesin Online / Ön Ödemeli sinyaller (En yüksek öncelik!)
-  if (
-    paymentObj.isPaid === true ||
-    paymentObj.is_paid === true ||
-    orderObj.isPaid === true ||
-    orderObj.is_paid === true ||
-    allText.includes('online') ||
-    allText.includes('prepaid') ||
-    allText.includes('pay_online') ||
-    rawValues.includes('paid')
-  ) {
-    return 'Online Ödeme';
+  // Kapıda / On_Delivery bayrağı var mı?
+  const hasOnDeliveryFlag = 
+    allText.includes('on_delivery') || 
+    allText.includes('door') || 
+    allText.includes('kapida') || 
+    allText.includes('pay_at_door') || 
+    allText.includes('pos');
+
+  // 3. Kapıda bayrağı VARSA ve Kredi Kartı/POS geçiyorsa -> KAPIDA KREDİ KARTI
+  if (hasOnDeliveryFlag && (allText.includes('credit') || allText.includes('kredi') || allText.includes('card') || allText.includes('kart'))) {
+    return 'Kapıda Kredi Kartı';
   }
 
-  // 4. Kesin Nakit sinyalleri
+  // 4. Nakit / Cash ibaresi varsa -> KAPIDA NAKİT
   if (allText.includes('cash') || allText.includes('nakit')) {
     return 'Kapıda Nakit';
   }
 
-  // 5. Kesin Kapıda Kart / POS sinyalleri
-  if (
-    allText.includes('pos') ||
-    allText.includes('credit') ||
-    allText.includes('kredi') ||
-    allText.includes('card') ||
-    allText.includes('kart')
-  ) {
-    return 'Kapıda Kredi Kartı';
-  }
-
-  // 6. Sadece açıkça kapıda ödeme belirtilmişse ve kart değilse
-  if (
-    rawValues.includes('on_delivery') ||
-    rawValues.includes('pay_on_delivery') ||
-    rawValues.includes('cash_on_delivery') ||
-    rawValues.includes('cod')
-  ) {
+  // 5. Sadece Kapıda bayrağı varsa (ve kart geçmiyorsa) -> KAPIDA NAKİT
+  if (hasOnDeliveryFlag) {
     return 'Kapıda Nakit';
   }
 
+  // 6. Geriye kalan tüm standart kart ödemeleri (CREDIT_CARD, ONLINE, PREPAID vb.) -> ONLINE ÖDEME
   return 'Online Ödeme';
 }
 
