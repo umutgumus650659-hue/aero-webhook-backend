@@ -56,12 +56,50 @@ app.get('/', (req, res) => res.send('AERO Webhook Backend - CANLI MOD AKTİF �
 app.post('/validate-api', (req, res) => res.json({ success: true, message: 'API doğrulandı 🟢' }));
 
 // ============================================================================
-// 2. FIRESTORE YARDIMCI DÖNÜŞTÜRÜCÜLER & GÜVENLİ MERGE KAYIT
+// 2. FIRESTORE YARDIMCI DÖNÜŞTÜRÜCÜLER, DERİN KOORDİNAT PARSER & GÜVENLİ MERGE
 // ============================================================================
 const toStr = (val) => ({ stringValue: String(val ?? '') });
 const toNum = (val) => ({ doubleValue: Number(val) || 0 });
 const toBool = (val) => ({ booleanValue: Boolean(val) });
 const toTime = (iso) => ({ timestampValue: iso });
+
+function parseCoordinates(data = {}, addr = {}, isletme = {}) {
+  const locObj = data.location || addr.location || data.deliveryAddress?.location || {};
+  const shipAddr = data.shipmentAddress || {};
+  const delivAddr = data.deliveryAddress || {};
+
+  const rawLat = 
+    data.latitude ??
+    data.lat ??
+    addr.latitude ??
+    addr.lat ??
+    locObj.latitude ??
+    locObj.lat ??
+    delivAddr.latitude ??
+    delivAddr.lat ??
+    shipAddr.latitude ??
+    shipAddr.lat;
+
+  const rawLng = 
+    data.longitude ??
+    data.lng ??
+    addr.longitude ??
+    addr.lng ??
+    locObj.longitude ??
+    locObj.lng ??
+    delivAddr.longitude ??
+    delivAddr.lng ??
+    shipAddr.longitude ??
+    shipAddr.lng;
+
+  const latNum = Number(rawLat);
+  const lngNum = Number(rawLng);
+
+  const validLat = (!isNaN(latNum) && latNum !== 0) ? latNum : (isletme.restoranEnlem || 41.6771);
+  const validLng = (!isNaN(lngNum) && lngNum !== 0) ? lngNum : (isletme.restoranBoylam || 26.5557);
+
+  return { lat: validLat, lng: validLng };
+}
 
 async function getIsletmeBilgileri(targetId, storeId = '', rawStoreName = '') {
   const searchId = String(targetId || storeId || '').trim();
@@ -387,23 +425,35 @@ app.post('/webhook/trendyol', async (req, res) => {
       addr.pinCode || addr.extension || customer.pinCode || customer.extension || data.pinCode || ''
     ).trim();
 
-    let mAdres = String(
-      addr.fullAddress || addr.addressText ||
-      [addr.address1, addr.address2].filter(Boolean).join(' ') ||
-      [addr.street, addr.buildingNumber ? `No:${addr.buildingNumber}` : '', addr.doorNumber ? `D:${addr.doorNumber}` : ''].filter(Boolean).join(' ') ||
-      ''
-    ).trim();
+    // GEL-AL SİPARİŞ TESPİTİ (GEL-AL İSE ADRESE ÖZEL EKLENTİ)
+    const isGelAl = 
+      String(data.deliveryType || data.shipmentPackageType || '').toUpperCase().includes('PICKUP') ||
+      String(data.deliveryType || data.shipmentPackageType || '').toUpperCase().includes('TAKE') ||
+      data.isPickup === true ||
+      data.is_pickup === true;
 
-    if (addr.addressDescription || addr.direction) {
+    let mAdres = isGelAl
+      ? '🎓 GEL-AL SİPARİŞİ (Müşteri Restorandan Teslim Alacak)'
+      : String(
+          addr.fullAddress || addr.addressText ||
+          [addr.address1, addr.address2].filter(Boolean).join(' ') ||
+          [addr.street, addr.buildingNumber ? `No:${addr.buildingNumber}` : '', addr.doorNumber ? `D:${addr.doorNumber}` : ''].filter(Boolean).join(' ') ||
+          ''
+        ).trim();
+
+    if (!isGelAl && (addr.addressDescription || addr.direction)) {
       mAdres += ` [Tarif: ${addr.addressDescription || addr.direction}]`;
     }
     const bolge = [addr.neighborhood, addr.district, addr.city].filter(Boolean).join(' / ');
-    if (bolge) mAdres += ` (${bolge})`;
+    if (!isGelAl && bolge) mAdres += ` (${bolge})`;
 
     const mNot = String(data.customerNote || data.note || addr.note || addr.notes || '').trim();
 
-    const lat = Number(addr.latitude || addr.lat || 0) || isletme.restoranEnlem;
-    const lng = Number(addr.longitude || addr.lng || 0) || isletme.restoranBoylam;
+    // MÜŞTERİ HARİTA KOORDİNATLARINI KUSURSUZ OKU
+    const coords = parseCoordinates(data, addr, isletme);
+    const lat = coords.lat;
+    const lng = coords.lng;
+
     const odemeTipi = parseOdemeTipi(paymentObj, data);
 
     const rawLines = data.lines || data.packageItems || data.items || data.products || [];
@@ -466,6 +516,7 @@ app.post('/webhook/trendyol', async (req, res) => {
       sepet: { arrayValue: { values: sepetArray } },
       durum: toStr('YENI'),
       status: toStr('YENI'),
+      isGelAl: toBool(isGelAl),
       isHazir: toBool(false),
       isWebArsiv: toBool(false),
       havuzdaMi: toBool(false),
@@ -488,6 +539,8 @@ app.post('/webhook/trendyol', async (req, res) => {
       paymentType: toStr(odemeTipi),
       enlem: toNum(lat),
       boylam: toNum(lng),
+      latitude: toNum(lat),
+      longitude: toNum(lng),
       konum: toStr(lat && lng ? `${lat}, ${lng}` : ''),
       restoranEnlem: toNum(isletme.restoranEnlem),
       restoranBoylam: toNum(isletme.restoranBoylam),
@@ -555,27 +608,37 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
     const mTel = String(customer.phone || customer.mobile_phone || deliv.phone || '').trim();
     const mPin = String(customer.extension_code || customer.pinCode || deliv.pin_code || '').trim();
 
-    let mAdres = String(
-      addr.full_address || addr.fullAddress ||
-      [
-        addr.street,
-        addr.building_number ? `No:${addr.building_number}` : '',
-        addr.floor ? `Kat:${addr.floor}` : '',
-        addr.flat_number ? `D:${addr.flat_number}` : ''
-      ].filter(Boolean).join(' ') ||
-      ''
-    ).trim();
+    const isGelAl = 
+      String(order.delivery_type || data.delivery_type || '').toUpperCase().includes('PICKUP') ||
+      String(order.delivery_type || data.delivery_type || '').toUpperCase().includes('TAKE') ||
+      order.is_pickup === true ||
+      data.is_pickup === true;
 
-    if (addr.delivery_instructions || addr.instructions) {
+    let mAdres = isGelAl
+      ? '🎓 GEL-AL SİPARİŞİ (Müşteri Restorandan Teslim Alacak)'
+      : String(
+          addr.full_address || addr.fullAddress ||
+          [
+            addr.street,
+            addr.building_number ? `No:${addr.building_number}` : '',
+            addr.floor ? `Kat:${addr.floor}` : '',
+            addr.flat_number ? `D:${addr.flat_number}` : ''
+          ].filter(Boolean).join(' ') ||
+          ''
+        ).trim();
+
+    if (!isGelAl && (addr.delivery_instructions || addr.instructions)) {
       mAdres += ` [Tarif: ${addr.delivery_instructions || addr.instructions}]`;
     }
     const bolge = [addr.neighborhood, addr.district, addr.city].filter(Boolean).join(' / ');
-    if (bolge) mAdres += ` (${bolge})`;
+    if (!isGelAl && bolge) mAdres += ` (${bolge})`;
 
     const mNot = String(deliv.instructions || order.comments?.customer_comment || data.notes || customer.customerNote || '').trim();
 
-    const lat = Number(addr.latitude || addr.lat || 0) || isletme.restoranEnlem;
-    const lng = Number(addr.longitude || addr.lng || 0) || isletme.restoranBoylam;
+    const coords = parseCoordinates(data, addr, isletme);
+    const lat = coords.lat;
+    const lng = coords.lng;
+
     const odemeTipi = parseOdemeTipi(order.payment || data.payment || {}, order);
 
     const rawItems = order.products || order.items || data.products || data.items || [];
@@ -632,6 +695,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       sepet: { arrayValue: { values: sepetArray } },
       durum: toStr('YENI'),
       status: toStr('YENI'),
+      isGelAl: toBool(isGelAl),
       isHazir: toBool(false),
       isWebArsiv: toBool(false),
       havuzdaMi: toBool(false),
@@ -654,6 +718,8 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
       paymentType: toStr(odemeTipi),
       enlem: toNum(lat),
       boylam: toNum(lng),
+      latitude: toNum(lat),
+      longitude: toNum(lng),
       konum: toStr(lat && lng ? `${lat}, ${lng}` : ''),
       restoranEnlem: toNum(isletme.restoranEnlem),
       restoranBoylam: toNum(isletme.restoranBoylam),
@@ -688,9 +754,9 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
     } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) {
       tyStatus = 'InDelivery';
     } else if (dLower.includes('hazır') || dLower.includes('hazir') || dLower.includes('hazırlan') || dLower.includes('hazirlan') || dLower.includes('pakett') || dLower.includes('pickedup') || dLower.includes('prepared') || dLower.includes('havuz')) {
-      tyStatus = 'PickedUp'; // Trendyol GO Resmi Hazırlandı / Yola Çıktı Statüsü
+      tyStatus = 'PickedUp'; // Trendyol Resmi "Sipariş Hazırlanıp Yola Çıktı" Statüsü
     } else if (dLower.includes('kabul') || dLower.includes('onay') || dLower.includes('yeni') || dLower.includes('picking')) {
-      tyStatus = 'Picking'; // Trendyol GO Resmi Kabul Statüsü
+      tyStatus = 'Picking'; // Trendyol Resmi "Sipariş Kabul Edildi" Statüsü
     }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
@@ -751,7 +817,7 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
   }
 }
 
-// RESTORAN MESAİ AÇ / KAPA SENKRONİZASYON BİLDİRİMİ (REASON ID = 2 İLE KESİN KAPATMA)
+// RESTORAN MESAİ AÇ / KAPA SENKRONİZASYON BİLDİRİMİ (%100 KUSURSUZ REASON ID VE ÇİFT ENDPOINT)
 app.post('/update-store-status', async (req, res) => {
   try {
     const { isletmeEmail, isOpen } = req.body;
