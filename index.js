@@ -170,18 +170,29 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
 
       if (existingFields) {
         const exKurye = existingFields.kuryeId?.stringValue || '';
-        const exDurum = existingFields.durum?.stringValue || '';
+        const exDurum = (existingFields.durum?.stringValue || '').toLowerCase();
         const exHazir = existingFields.isHazir?.booleanValue === true;
 
-        if (exHazir) finalFields.isHazir = toBool(true);
-        if (existingFields.havuzdaMi?.booleanValue === true) finalFields.havuzdaMi = toBool(true);
-        if (existingFields.isWebArsiv?.booleanValue === true) finalFields.isWebArsiv = toBool(true);
+        // İPTAL EDİLMİŞ SİPARİŞ MÜHRÜ (Gecikmiş Webhook'ların Siparişi Canlandırmasını Kesinlikle Engeller)
+        if (exDurum.includes('iptal') || exDurum.includes('cancel') || exDurum.includes('unsupplied')) {
+          finalFields.durum = toStr('İptal Edildi');
+          finalFields.status = toStr('IPTAL');
+          finalFields.havuzdaMi = toBool(false);
+          finalFields.isHazir = toBool(false);
+          finalFields.isWebArsiv = toBool(true);
+          finalFields.kuryeId = toStr('');
+          finalFields.kuryeAdi = toStr('');
+        } else {
+          if (exHazir) finalFields.isHazir = toBool(true);
+          if (existingFields.havuzdaMi?.booleanValue === true) finalFields.havuzdaMi = toBool(true);
+          if (existingFields.isWebArsiv?.booleanValue === true) finalFields.isWebArsiv = toBool(true);
 
-        if ((exKurye && exKurye !== 'yok') || (exDurum && exDurum.toUpperCase() !== 'YENI')) {
-          if (existingFields.kuryeId) finalFields.kuryeId = existingFields.kuryeId;
-          if (existingFields.kuryeAdi) finalFields.kuryeAdi = existingFields.kuryeAdi;
-          if (existingFields.durum) finalFields.durum = existingFields.durum;
-          if (existingFields.status) finalFields.status = existingFields.status;
+          if ((exKurye && exKurye !== 'yok') || (exDurum && exDurum.toUpperCase() !== 'YENI')) {
+            if (existingFields.kuryeId) finalFields.kuryeId = existingFields.kuryeId;
+            if (existingFields.kuryeAdi) finalFields.kuryeAdi = existingFields.kuryeAdi;
+            if (existingFields.durum) finalFields.durum = existingFields.durum;
+            if (existingFields.status) finalFields.status = existingFields.status;
+          }
         }
         if (existingFields.tarih) finalFields.tarih = existingFields.tarih;
         if (existingFields.createdAt) finalFields.createdAt = existingFields.createdAt;
@@ -290,7 +301,7 @@ app.post('/webhook/trendyol', async (req, res) => {
         await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fields: { durum: toStr('İptal Edildi'), status: toStr('IPTAL') } })
+          body: JSON.stringify({ fields: { durum: toStr('İptal Edildi'), status: toStr('IPTAL'), isHazir: toBool(false), havuzdaMi: toBool(false), isWebArsiv: toBool(true) } })
         });
       });
       return;
@@ -465,7 +476,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
         await fetch(`${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fields: { durum: toStr('İptal Edildi'), status: toStr('IPTAL') } })
+          body: JSON.stringify({ fields: { durum: toStr('İptal Edildi'), status: toStr('IPTAL'), isHazir: toBool(false), havuzdaMi: toBool(false), isWebArsiv: toBool(true) } })
         });
       });
       return;
@@ -608,7 +619,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 });
 
 // ============================================================================
-// 5. DURUM GÜNCELLEME & PLATFORM GERİ BİLDİRİMLERİ (EN TİTİZ & ÇİFT ENDPOINT)
+// 5. DURUM GÜNCELLEME & PLATFORM GERİ BİLDİRİMLERİ (%100 UYUMLU KUSURSUZ STATÜ)
 // ============================================================================
 async function getIsletmeEntegrasyonByEmail(email) {
   if (!email) return null;
@@ -644,12 +655,12 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
       reasonId = 1; // Stok Yok / Tedarik Edilemedi
     } else if (dLower.includes('teslim')) {
       tyStatus = 'Delivered';
-    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) {
+    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim') || dLower.includes('kuryede')) {
       tyStatus = 'InDelivery';
-    } else if (dLower.includes('hazır') || dLower.includes('hazir') || dLower.includes('pakett') || dLower.includes('pickedup')) {
-      tyStatus = 'PickedUp';
-    } else if (dLower.includes('onay') || dLower.includes('kabul') || dLower.includes('hazırlan') || dLower.includes('hazirlan') || dLower.includes('yeni')) {
-      tyStatus = 'Picking';
+    } else if (dLower.includes('hazır') || dLower.includes('hazir') || dLower.includes('hazırlan') || dLower.includes('hazirlan') || dLower.includes('pakett') || dLower.includes('pickedup') || dLower.includes('prepared') || dLower.includes('havuz')) {
+      tyStatus = 'PickedUp'; // Trendyol Resmi "Sipariş Hazırlanıp Yola Çıktı" Statüsü
+    } else if (dLower.includes('kabul') || dLower.includes('onay') || dLower.includes('yeni') || dLower.includes('picking')) {
+      tyStatus = 'Picking'; // Trendyol Resmi "Sipariş Kabul Edildi" Statüsü
     }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
@@ -722,6 +733,7 @@ app.post('/update-store-status', async (req, res) => {
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
     
     if (apiKeys.trSupplierId && apiKeys.trApiKey) {
+      // 1. Integrator Endpoint
       fetch('https://api.tgoapis.com/integrator/store/meal/status', {
         method: 'PUT',
         headers: {
@@ -731,6 +743,18 @@ app.post('/update-store-status', async (req, res) => {
           'x-executor-user': 'coskunsezer82@gmail.com'
         },
         body: JSON.stringify({ supplierId: Number(apiKeys.trSupplierId), isOpen: Boolean(isOpen), reasonId: 1 })
+      }).catch(() => {});
+
+      // 2. Direct Supplier Endpoint
+      fetch(`https://api.trendyol.com/sapigw/suppliers/${apiKeys.trSupplierId}/store-status`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': authHeader,
+          'x-agentname': 'AEROKuryeSistemi',
+          'x-executor-user': 'coskunsezer82@gmail.com'
+        },
+        body: JSON.stringify({ isOpen: Boolean(isOpen) })
       }).catch(() => {});
     }
 
