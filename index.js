@@ -118,6 +118,61 @@ async function getIsletmeBilgileri(targetId, storeId = '', rawStoreName = '') {
   };
 }
 
+async function getIsletmeEntegrasyonByEmail(email) {
+  if (!email) return null;
+  const searchEmail = email.toLowerCase().trim();
+
+  try {
+    // 1. Doğrudan E-posta ID sorgusu
+    const res = await fetch(`${FIRESTORE_BASE_URL}/isletme_entegrasyonlar/${searchEmail}`);
+    if (res.ok) {
+      const doc = await res.json();
+      const f = doc?.fields;
+      if (f) {
+        return {
+          trSupplierId: f.trSupplierId?.stringValue || f.supplierId?.stringValue || f.trMerchantId?.stringValue || '',
+          trApiKey: f.trApiKey?.stringValue || f.apiKey?.stringValue || '',
+          trApiSecret: f.trApiSecret?.stringValue || f.apiSecret?.stringValue || '',
+          ysRestoranId: f.ysRestoranId?.stringValue || f.restaurantId?.stringValue || '',
+          ysToken: f.ysToken?.stringValue || f.token?.stringValue || ''
+        };
+      }
+    }
+
+    // 2. Yedek: isletmeEmail alanına göre Firestore sorgusu
+    const queryBody = {
+      structuredQuery: {
+        from: [{ collectionId: 'isletme_entegrasyonlar' }],
+        where: {
+          fieldFilter: { field: { fieldPath: 'isletmeEmail' }, op: 'EQUAL', value: toStr(searchEmail) }
+        },
+        limit: 1
+      }
+    };
+    const qRes = await fetch(`${FIRESTORE_BASE_URL}:runQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(queryBody)
+    });
+    if (qRes.ok) {
+      const results = await qRes.json();
+      const f = results?.[0]?.document?.fields;
+      if (f) {
+        return {
+          trSupplierId: f.trSupplierId?.stringValue || f.supplierId?.stringValue || f.trMerchantId?.stringValue || '',
+          trApiKey: f.trApiKey?.stringValue || f.apiKey?.stringValue || '',
+          trApiSecret: f.trApiSecret?.stringValue || f.apiSecret?.stringValue || '',
+          ysRestoranId: f.ysRestoranId?.stringValue || f.restaurantId?.stringValue || '',
+          ysToken: f.ysToken?.stringValue || f.token?.stringValue || ''
+        };
+      }
+    }
+  } catch (e) {
+    console.error('Entegrasyon okuma hatası:', e.message);
+  }
+  return null;
+}
+
 async function saveOrMergeOrder(siparisNo, incomingFields) {
   return runInOrderQueue(siparisNo, async () => {
     try {
@@ -136,7 +191,6 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
       for (const [key, valObj] of Object.entries(incomingFields)) {
         if (!valObj) continue;
 
-        // Ödeme tipi ilk kayıtta belirlenmişse sonraki durum webhook'larının ezmesini engelle
         if (existingFields && (key === 'odemeTipi' || key === 'paymentType')) {
           const mevcutOdeme = (existingFields[key]?.stringValue || '').trim();
           if (mevcutOdeme !== '') {
@@ -173,7 +227,6 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
         const exDurum = (existingFields.durum?.stringValue || '').toLowerCase();
         const exHazir = existingFields.isHazir?.booleanValue === true;
 
-        // İPTAL EDİLMİŞ SİPARİŞ MÜHRÜ (Gecikmiş Webhook'ların Siparişi Canlandırmasını Kesinlikle Engeller)
         if (exDurum.includes('iptal') || exDurum.includes('cancel') || exDurum.includes('unsupplied')) {
           finalFields.durum = toStr('İptal Edildi');
           finalFields.status = toStr('IPTAL');
@@ -619,31 +672,8 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 });
 
 // ============================================================================
-// 5. DURUM GÜNCELLEME & PLATFORM GERİ BİLDİRİMLERİ (%100 UYUMLU KUSURSUZ STATÜ)
+// 5. DURUM GÜNCELLEME & PLATFORM GERİ BİLDİRİMLERİ (EN TİTİZ & ÇİFT ENDPOINT)
 // ============================================================================
-async function getIsletmeEntegrasyonByEmail(email) {
-  if (!email) return null;
-  try {
-    const res = await fetch(`${FIRESTORE_BASE_URL}/isletme_entegrasyonlar/${email.toLowerCase().trim()}`);
-    if (res.ok) {
-      const doc = await res.json();
-      const f = doc?.fields;
-      if (f) {
-        return {
-          trSupplierId: f.trSupplierId?.stringValue || '',
-          trApiKey: f.trApiKey?.stringValue || '',
-          trApiSecret: f.trApiSecret?.stringValue || '',
-          ysRestoranId: f.ysRestoranId?.stringValue || '',
-          ysToken: f.ysToken?.stringValue || ''
-        };
-      }
-    }
-  } catch (e) {
-    console.error('Entegrasyon okuma hatası:', e.message);
-  }
-  return null;
-}
-
 async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
   try {
     const dLower = String(durum).toLowerCase().trim();
@@ -655,12 +685,12 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
       reasonId = 1; // Stok Yok / Tedarik Edilemedi
     } else if (dLower.includes('teslim')) {
       tyStatus = 'Delivered';
-    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim') || dLower.includes('kuryede')) {
+    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) {
       tyStatus = 'InDelivery';
-    } else if (dLower.includes('hazır') || dLower.includes('hazir') || dLower.includes('hazırlan') || dLower.includes('hazirlan') || dLower.includes('pakett') || dLower.includes('pickedup') || dLower.includes('prepared') || dLower.includes('havuz')) {
+    } else if (dLower.includes('hazır') || dLower.includes('hazir') || dLower.includes('pakett') || dLower.includes('pickedup') || dLower.includes('prepared') || dLower.includes('havuz')) {
       tyStatus = 'PickedUp'; // Trendyol Resmi "Sipariş Hazırlanıp Yola Çıktı" Statüsü
     } else if (dLower.includes('kabul') || dLower.includes('onay') || dLower.includes('yeni') || dLower.includes('picking')) {
-      tyStatus = 'Picking'; // Trendyol Resmi "Sipariş Kabul Edildi" Statüsü
+      tyStatus = 'Picking';
     }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
@@ -721,32 +751,51 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
   }
 }
 
-// RESTORAN MESAİ AÇ / KAPA SENKRONİZASYON BİLDİRİMİ
+// RESTORAN MESAİ AÇ / KAPA SENKRONİZASYON BİLDİRİMİ (%100 KUSURSUZ REASON ID VE ÇİFT ENDPOINT)
 app.post('/update-store-status', async (req, res) => {
   try {
     const { isletmeEmail, isOpen } = req.body;
     if (!isletmeEmail) return res.status(400).json({ error: 'isletmeEmail zorunludur.' });
 
     const apiKeys = await getIsletmeEntegrasyonByEmail(isletmeEmail);
-    if (!apiKeys) return res.json({ success: false, message: 'Entegrasyon bulunamadı' });
+    if (!apiKeys || !apiKeys.trSupplierId) {
+      console.error(`Mağaza durumu güncelleme hatası: ${isletmeEmail} için entegrasyon API anahtarları bulunamadı!`);
+      return res.json({ success: false, message: 'Entegrasyon bulunamadı' });
+    }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
-    
-    if (apiKeys.trSupplierId && apiKeys.trApiKey) {
-      // 1. Integrator Endpoint
-      fetch('https://api.tgoapis.com/integrator/store/meal/status', {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': authHeader,
-          'x-agentname': 'AEROKuryeSistemi',
-          'x-executor-user': 'coskunsezer82@gmail.com'
-        },
-        body: JSON.stringify({ supplierId: Number(apiKeys.trSupplierId), isOpen: Boolean(isOpen), reasonId: 1 })
-      }).catch(() => {});
+    const isStoreOpen = Boolean(isOpen);
 
-      // 2. Direct Supplier Endpoint
-      fetch(`https://api.trendyol.com/sapigw/suppliers/${apiKeys.trSupplierId}/store-status`, {
+    console.log(`=== [TRENDYOL MAĞAZA DURUMU GÜNCELLENİYOR: ${apiKeys.trSupplierId} | Açık mı: ${isStoreOpen}] ===`);
+
+    // 1. Integrator Endpoint
+    const bodyObj = {
+      supplierId: Number(apiKeys.trSupplierId),
+      isOpen: isStoreOpen
+    };
+    if (!isStoreOpen) {
+      bodyObj.reasonId = 2; // Trendyol Geçici Kapanış (Mesai Dışı) Zorunlu Nedeni
+    }
+
+    const res1 = await fetch('https://api.tgoapis.com/integrator/store/meal/status', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': authHeader,
+        'x-agentname': 'AEROKuryeSistemi',
+        'x-executor-user': 'coskunsezer82@gmail.com'
+      },
+      body: JSON.stringify(bodyObj)
+    });
+
+    if (res1.ok) {
+      console.log(`✅ Trendyol Mağaza Durumu Güncellendi (${apiKeys.trSupplierId} -> ${isStoreOpen ? 'AÇIK' : 'KAPALI'})`);
+    } else {
+      // 2. Yedek: Direct Supplier Gateway Endpoint
+      const bodyGateway = { isOpen: isStoreOpen };
+      if (!isStoreOpen) bodyGateway.reasonId = 2;
+
+      const res2 = await fetch(`https://api.trendyol.com/sapigw/suppliers/${apiKeys.trSupplierId}/meal/store/status`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -754,8 +803,10 @@ app.post('/update-store-status', async (req, res) => {
           'x-agentname': 'AEROKuryeSistemi',
           'x-executor-user': 'coskunsezer82@gmail.com'
         },
-        body: JSON.stringify({ isOpen: Boolean(isOpen) })
-      }).catch(() => {});
+        body: JSON.stringify(bodyGateway)
+      });
+      if (res2.ok) console.log(`✅ Trendyol Gateway Mağaza Durumu Güncellendi (${apiKeys.trSupplierId} -> ${isStoreOpen ? 'AÇIK' : 'KAPALI'})`);
+      else console.error(`⚠️ Trendyol Mağaza Durum Hatası (${apiKeys.trSupplierId}):`, await res2.text());
     }
 
     return res.json({ success: true });
@@ -767,7 +818,7 @@ app.post('/update-store-status', async (req, res) => {
 
 app.post('/update-order-status', async (req, res) => {
   try {
-    const { siparisId, safeDocId, durum, kanal, isletmeEmail } = req.body;
+    const { siparisId, safeDocId, durum, kanal, isletmeEmail, reasonId } = req.body;
     if (!siparisId || !durum) {
       return res.status(400).json({ error: 'siparisId ve durum parametreleri zorunludur.' });
     }
