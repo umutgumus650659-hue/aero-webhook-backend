@@ -205,12 +205,10 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
   });
 }
 
-// %100 KUSURSUZ NOKTA ATIŞI ÖDEME TİPİ PARSER (KAPIDA VS ONLINE ÇAKIŞMA KORUMALI)
 function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
   const orderObj = dataRoot.order || dataRoot;
   const onDeliv = paymentObj.onDelivery || {};
 
-  // 1. Önce Yemek Kartı kontrolü
   const mealCard = String(
     paymentObj.mealCard ||
     paymentObj.mealCardType ||
@@ -223,7 +221,6 @@ function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
     return `Yemek Kartı (${mealCard.toUpperCase()})`;
   }
 
-  // 2. Ham ödeme alanlarını topla
   const rawValues = [
     dataRoot.paymentMethod,
     dataRoot.paymentType,
@@ -248,7 +245,6 @@ function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
 
   const allText = rawValues.join(' ');
 
-  // Kapıda / On_Delivery bayrağı var mı?
   const hasOnDeliveryFlag = 
     allText.includes('on_delivery') || 
     allText.includes('door') || 
@@ -256,22 +252,18 @@ function parseOdemeTipi(paymentObj = {}, dataRoot = {}) {
     allText.includes('pay_at_door') || 
     allText.includes('pos');
 
-  // 3. Kapıda bayrağı VARSA ve Kredi Kartı/POS geçiyorsa -> KAPIDA KREDİ KARTI
   if (hasOnDeliveryFlag && (allText.includes('credit') || allText.includes('kredi') || allText.includes('card') || allText.includes('kart'))) {
     return 'Kapıda Kredi Kartı';
   }
 
-  // 4. Nakit / Cash ibaresi varsa -> KAPIDA NAKİT
   if (allText.includes('cash') || allText.includes('nakit')) {
     return 'Kapıda Nakit';
   }
 
-  // 5. Sadece Kapıda bayrağı varsa (ve kart geçmiyorsa) -> KAPIDA NAKİT
   if (hasOnDeliveryFlag) {
     return 'Kapıda Nakit';
   }
 
-  // 6. Geriye kalan tüm standart kart ödemeleri (CREDIT_CARD, ONLINE, PREPAID vb.) -> ONLINE ÖDEME
   return 'Online Ödeme';
 }
 
@@ -616,7 +608,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 });
 
 // ============================================================================
-// 5. DURUM GÜNCELLEME & PLATFORM GERİ BİLDİRİMLERİ
+// 5. DURUM GÜNCELLEME & PLATFORM GERİ BİLDİRİMLERİ (EN TİTİZ & ÇİFT ENDPOINT)
 // ============================================================================
 async function getIsletmeEntegrasyonByEmail(email) {
   if (!email) return null;
@@ -645,12 +637,28 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
   try {
     const dLower = String(durum).toLowerCase().trim();
     let tyStatus = 'Picking';
-    if (dLower.includes('iptal') || dLower.includes('unsupplied')) tyStatus = 'UnSupplied';
-    else if (dLower.includes('teslim')) tyStatus = 'Delivered';
-    else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) tyStatus = 'InDelivery';
+    let reasonId = null;
+
+    if (dLower.includes('iptal') || dLower.includes('unsupplied') || dLower.includes('red')) {
+      tyStatus = 'UnSupplied';
+      reasonId = 1; // Stok Yok / Tedarik Edilemedi
+    } else if (dLower.includes('teslim')) {
+      tyStatus = 'Delivered';
+    } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) {
+      tyStatus = 'InDelivery';
+    } else if (dLower.includes('hazır') || dLower.includes('hazir') || dLower.includes('pakett') || dLower.includes('pickedup')) {
+      tyStatus = 'PickedUp';
+    } else if (dLower.includes('onay') || dLower.includes('kabul') || dLower.includes('hazırlan') || dLower.includes('hazirlan') || dLower.includes('yeni')) {
+      tyStatus = 'Picking';
+    }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
-    await fetch('https://api.tgoapis.com/integrator/order/meal/status', {
+    
+    const bodyObj = { supplierId: Number(supplierId), orderId: String(orderId), status: tyStatus };
+    if (reasonId) bodyObj.reasonId = reasonId;
+
+    // 1. Entegratör API Uç Noktasına Gönder
+    const res1 = await fetch('https://api.tgoapis.com/integrator/order/meal/status', {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -658,8 +666,26 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
         'x-agentname': 'AEROKuryeSistemi',
         'x-executor-user': 'coskunsezer82@gmail.com'
       },
-      body: JSON.stringify({ supplierId: Number(supplierId), orderId: String(orderId), status: tyStatus })
+      body: JSON.stringify(bodyObj)
     });
+
+    if (res1.ok) {
+      console.log(`✅ Trendyol Statü Güncellendi (${orderId} -> ${tyStatus})`);
+    } else {
+      // 2. Yedek: Doğrudan Supplier API Gateway Uç Noktasına Gönder
+      const res2 = await fetch(`https://api.trendyol.com/sapigw/suppliers/${supplierId}/meal/orders/${orderId}/status`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': authHeader,
+          'x-agentname': 'AEROKuryeSistemi',
+          'x-executor-user': 'coskunsezer82@gmail.com'
+        },
+        body: JSON.stringify({ status: tyStatus, reasonId: reasonId })
+      });
+      if (res2.ok) console.log(`✅ Trendyol Gateway Statü Güncellendi (${orderId} -> ${tyStatus})`);
+      else console.error(`⚠️ Trendyol Statü Hatası (${orderId}):`, await res2.text());
+    }
   } catch (e) {
     console.error('Trendyol Status Bildirim Hatası:', e.message);
   }
@@ -669,7 +695,7 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
   try {
     const dLower = String(durum).toLowerCase().trim();
     let ysStatus = 'in_preparation';
-    if (dLower.includes('iptal') || dLower.includes('cancel')) ysStatus = 'cancelled';
+    if (dLower.includes('iptal') || dLower.includes('cancel') || dLower.includes('red')) ysStatus = 'cancelled';
     else if (dLower.includes('kabul') || dLower.includes('onay')) ysStatus = 'accepted';
     else if (dLower.includes('teslim')) ysStatus = 'delivered';
     else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) ysStatus = 'in_delivery';
@@ -684,17 +710,48 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
   }
 }
 
+// RESTORAN MESAİ AÇ / KAPA SENKRONİZASYON BİLDİRİMİ
+app.post('/update-store-status', async (req, res) => {
+  try {
+    const { isletmeEmail, isOpen } = req.body;
+    if (!isletmeEmail) return res.status(400).json({ error: 'isletmeEmail zorunludur.' });
+
+    const apiKeys = await getIsletmeEntegrasyonByEmail(isletmeEmail);
+    if (!apiKeys) return res.json({ success: false, message: 'Entegrasyon bulunamadı' });
+
+    const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
+    
+    if (apiKeys.trSupplierId && apiKeys.trApiKey) {
+      fetch('https://api.tgoapis.com/integrator/store/meal/status', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': authHeader,
+          'x-agentname': 'AEROKuryeSistemi',
+          'x-executor-user': 'coskunsezer82@gmail.com'
+        },
+        body: JSON.stringify({ supplierId: Number(apiKeys.trSupplierId), isOpen: Boolean(isOpen), reasonId: 1 })
+      }).catch(() => {});
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Store status hatası:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/update-order-status', async (req, res) => {
   try {
-    const { siparisId, durum, kanal, isletmeEmail } = req.body;
+    const { siparisId, safeDocId, durum, kanal, isletmeEmail } = req.body;
     if (!siparisId || !durum) {
       return res.status(400).json({ error: 'siparisId ve durum parametreleri zorunludur.' });
     }
 
-    const safeDocId = String(siparisId).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const docKey = String(safeDocId || siparisId).replace(/[^a-zA-Z0-9_-]/g, '_');
     const isHazir = durum.toLowerCase().includes('hazır') || durum.toLowerCase().includes('hazirlan');
 
-    let updateUrl = `${FIRESTORE_BASE_URL}/siparisler/${safeDocId}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`;
+    let updateUrl = `${FIRESTORE_BASE_URL}/siparisler/${docKey}?updateMask.fieldPaths=durum&updateMask.fieldPaths=status`;
     const fields = { durum: toStr(durum), status: toStr(durum) };
 
     if (isHazir) {
