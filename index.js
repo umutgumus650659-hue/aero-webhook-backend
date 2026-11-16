@@ -123,7 +123,6 @@ async function getIsletmeEntegrasyonByEmail(email) {
   const searchEmail = email.toLowerCase().trim();
 
   try {
-    // 1. Doğrudan E-posta ID sorgusu
     const res = await fetch(`${FIRESTORE_BASE_URL}/isletme_entegrasyonlar/${searchEmail}`);
     if (res.ok) {
       const doc = await res.json();
@@ -131,6 +130,7 @@ async function getIsletmeEntegrasyonByEmail(email) {
       if (f) {
         return {
           trSupplierId: f.trSupplierId?.stringValue || f.supplierId?.stringValue || f.trMerchantId?.stringValue || '',
+          trStoreId: f.trStoreId?.stringValue || f.storeId?.stringValue || '',
           trApiKey: f.trApiKey?.stringValue || f.apiKey?.stringValue || '',
           trApiSecret: f.trApiSecret?.stringValue || f.apiSecret?.stringValue || '',
           ysRestoranId: f.ysRestoranId?.stringValue || f.restaurantId?.stringValue || '',
@@ -139,7 +139,6 @@ async function getIsletmeEntegrasyonByEmail(email) {
       }
     }
 
-    // 2. Yedek: isletmeEmail alanına göre Firestore sorgusu
     const queryBody = {
       structuredQuery: {
         from: [{ collectionId: 'isletme_entegrasyonlar' }],
@@ -160,6 +159,7 @@ async function getIsletmeEntegrasyonByEmail(email) {
       if (f) {
         return {
           trSupplierId: f.trSupplierId?.stringValue || f.supplierId?.stringValue || f.trMerchantId?.stringValue || '',
+          trStoreId: f.trStoreId?.stringValue || f.storeId?.stringValue || '',
           trApiKey: f.trApiKey?.stringValue || f.apiKey?.stringValue || '',
           trApiSecret: f.trApiSecret?.stringValue || f.apiSecret?.stringValue || '',
           ysRestoranId: f.ysRestoranId?.stringValue || f.restaurantId?.stringValue || '',
@@ -672,7 +672,7 @@ app.post('/webhook/yemeksepeti', async (req, res) => {
 });
 
 // ============================================================================
-// 5. DURUM GÜNCELLEME & PLATFORM GERİ BİLDİRİMLERİ (EN TİTİZ & ÇİFT ENDPOINT)
+// 5. DURUM GÜNCELLEME & PLATFORM GERİ BİLDİRİMLERİ (TAM UYUMLU STATÜ BİLDİRİMİ)
 // ============================================================================
 async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
   try {
@@ -687,10 +687,10 @@ async function sendTrendyolStatusUpdate(supplierId, orderId, durum, apiKeys) {
       tyStatus = 'Delivered';
     } else if (dLower.includes('yolda') || dLower.includes('atandi') || dLower.includes('kurye') || dLower.includes('dagitim')) {
       tyStatus = 'InDelivery';
-    } else if (dLower.includes('hazır') || dLower.includes('hazir') || dLower.includes('pakett') || dLower.includes('pickedup') || dLower.includes('prepared') || dLower.includes('havuz')) {
-      tyStatus = 'PickedUp'; // Trendyol Resmi "Sipariş Hazırlanıp Yola Çıktı" Statüsü
+    } else if (dLower.includes('hazır') || dLower.includes('hazir') || dLower.includes('hazırlan') || dLower.includes('hazirlan') || dLower.includes('pakett') || dLower.includes('pickedup') || dLower.includes('prepared') || dLower.includes('havuz')) {
+      tyStatus = 'PickedUp'; // Trendyol GO Resmi Hazırlandı / Yola Çıktı Statüsü
     } else if (dLower.includes('kabul') || dLower.includes('onay') || dLower.includes('yeni') || dLower.includes('picking')) {
-      tyStatus = 'Picking';
+      tyStatus = 'Picking'; // Trendyol GO Resmi Kabul Statüsü
     }
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
@@ -751,7 +751,7 @@ async function sendYemeksepetiStatusUpdate(restaurantId, orderCode, durum, apiKe
   }
 }
 
-// RESTORAN MESAİ AÇ / KAPA SENKRONİZASYON BİLDİRİMİ (%100 KUSURSUZ REASON ID VE ÇİFT ENDPOINT)
+// RESTORAN MESAİ AÇ / KAPA SENKRONİZASYON BİLDİRİMİ (REASON ID = 2 İLE KESİN KAPATMA)
 app.post('/update-store-status', async (req, res) => {
   try {
     const { isletmeEmail, isOpen } = req.body;
@@ -765,18 +765,21 @@ app.post('/update-store-status', async (req, res) => {
 
     const authHeader = 'Basic ' + Buffer.from(`${apiKeys.trApiKey}:${apiKeys.trApiSecret}`).toString('base64');
     const isStoreOpen = Boolean(isOpen);
+    const supplierIdNum = Number(apiKeys.trSupplierId);
+    const storeIdNum = Number(apiKeys.trStoreId || apiKeys.trSupplierId);
 
-    console.log(`=== [TRENDYOL MAĞAZA DURUMU GÜNCELLENİYOR: ${apiKeys.trSupplierId} | Açık mı: ${isStoreOpen}] ===`);
+    console.log(`=== [TRENDYOL MAĞAZA DURUMU GÜNCELLENİYOR: ${supplierIdNum} / Store: ${storeIdNum} | Açık mı: ${isStoreOpen}] ===`);
 
-    // 1. Integrator Endpoint
     const bodyObj = {
-      supplierId: Number(apiKeys.trSupplierId),
+      supplierId: supplierIdNum,
+      storeId: storeIdNum,
       isOpen: isStoreOpen
     };
     if (!isStoreOpen) {
       bodyObj.reasonId = 2; // Trendyol Geçici Kapanış (Mesai Dışı) Zorunlu Nedeni
     }
 
+    // 1. Integrator Endpoint
     const res1 = await fetch('https://api.tgoapis.com/integrator/store/meal/status', {
       method: 'PUT',
       headers: {
@@ -789,13 +792,13 @@ app.post('/update-store-status', async (req, res) => {
     });
 
     if (res1.ok) {
-      console.log(`✅ Trendyol Mağaza Durumu Güncellendi (${apiKeys.trSupplierId} -> ${isStoreOpen ? 'AÇIK' : 'KAPALI'})`);
+      console.log(`✅ Trendyol Mağaza Durumu Güncellendi (${supplierIdNum} -> ${isStoreOpen ? 'AÇIK' : 'KAPALI'})`);
     } else {
       // 2. Yedek: Direct Supplier Gateway Endpoint
       const bodyGateway = { isOpen: isStoreOpen };
       if (!isStoreOpen) bodyGateway.reasonId = 2;
 
-      const res2 = await fetch(`https://api.trendyol.com/sapigw/suppliers/${apiKeys.trSupplierId}/meal/store/status`, {
+      const res2 = await fetch(`https://api.trendyol.com/sapigw/suppliers/${supplierIdNum}/meal/store/status`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -805,8 +808,8 @@ app.post('/update-store-status', async (req, res) => {
         },
         body: JSON.stringify(bodyGateway)
       });
-      if (res2.ok) console.log(`✅ Trendyol Gateway Mağaza Durumu Güncellendi (${apiKeys.trSupplierId} -> ${isStoreOpen ? 'AÇIK' : 'KAPALI'})`);
-      else console.error(`⚠️ Trendyol Mağaza Durum Hatası (${apiKeys.trSupplierId}):`, await res2.text());
+      if (res2.ok) console.log(`✅ Trendyol Gateway Mağaza Durumu Güncellendi (${supplierIdNum} -> ${isStoreOpen ? 'AÇIK' : 'KAPALI'})`);
+      else console.error(`⚠️ Trendyol Mağaza Durum Hatası (${supplierIdNum}):`, await res2.text());
     }
 
     return res.json({ success: true });
