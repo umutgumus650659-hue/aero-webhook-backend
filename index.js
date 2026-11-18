@@ -265,6 +265,28 @@ async function saveOrMergeOrder(siparisNo, incomingFields) {
         const exDurum = (existingFields.durum?.stringValue || '').toLowerCase();
         const exHazir = existingFields.isHazir?.booleanValue === true;
 
+        // MÜŞTERİ HARİTA KOORDİNAT VE ADRES KALKANI (Durum Webhook'larının Konumu Ezmesini Kesinlikle Engeller)
+        if (existingFields.enlem?.doubleValue && existingFields.enlem.doubleValue !== 0) {
+          finalFields.enlem = existingFields.enlem;
+        }
+        if (existingFields.boylam?.doubleValue && existingFields.boylam.doubleValue !== 0) {
+          finalFields.boylam = existingFields.boylam;
+        }
+        if (existingFields.latitude?.doubleValue && existingFields.latitude.doubleValue !== 0) {
+          finalFields.latitude = existingFields.latitude;
+        }
+        if (existingFields.longitude?.doubleValue && existingFields.longitude.doubleValue !== 0) {
+          finalFields.longitude = existingFields.longitude;
+        }
+        if (existingFields.konum?.stringValue) {
+          finalFields.konum = existingFields.konum;
+        }
+        if (existingFields.adres?.stringValue && !existingFields.adres.stringValue.includes('Adres Belirtilmedi')) {
+          finalFields.adres = existingFields.adres;
+          finalFields.address = existingFields.address;
+          finalFields.teslimatAdresi = existingFields.teslimatAdresi;
+        }
+
         if (exDurum.includes('iptal') || exDurum.includes('cancel') || exDurum.includes('unsupplied')) {
           finalFields.durum = toStr('İptal Edildi');
           finalFields.status = toStr('IPTAL');
